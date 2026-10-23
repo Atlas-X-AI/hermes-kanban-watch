@@ -1,0 +1,18 @@
+[project]
+name = "hermes-kanban-watch"
+version = "0.1.0"
+description = "Read-only Hermes Kanban workers as live Claude Code workflow rows"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{name = "Atlas X AI"}]
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

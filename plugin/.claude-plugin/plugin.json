@@ -1,0 +1,13 @@
+{
+  "name": "hermes-kanban-watch",
+  "version": "0.1.0",
+  "description": "Read-only Hermes Kanban cards as live Claude Code workflow rows, with portable routing and setup checks.",
+  "author": {
+    "name": "Atlas X AI",
+    "url": "https://atlas-ai.au"
+  },
+  "homepage": "https://github.com/Atlas-X-AI/hermes-kanban-watch",
+  "repository": "https://github.com/Atlas-X-AI/hermes-kanban-watch",
+  "license": "MIT",
+  "keywords": ["hermes", "kanban", "claude-code", "workflow", "read-only", "monitoring"]
+}

@@ -1,0 +1,25 @@
+# Edit profile names, models and providers to match your own Hermes setup.
+# Mapping-only YAML: two spaces per level, identifier strings, optional quotes.
+# Providers are mapped to MODEL families, not API hosts: two hosts serving the
+# same model family must use the same family here. No credentials belong here.
+providers:
+  openai: gpt
+  anthropic: claude
+classes:
+  app-code:
+    profile: builder
+    model: gpt-5
+    provider: openai
+  docs:
+    profile: reviewer
+    model: claude-sonnet-4-5
+    provider: anthropic
+verifiers:
+  gpt:
+    profile: reviewer
+    model: claude-sonnet-4-5
+    provider: anthropic
+  claude:
+    profile: builder
+    model: gpt-5
+    provider: openai

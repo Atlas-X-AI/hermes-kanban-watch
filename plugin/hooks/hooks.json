@@ -1,0 +1,17 @@
+{
+  "description": "Suggest a read-only watch after Hermes cards are filed; never block or dispatch.",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/kanban_watch_nudge.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "hermes-kanban-watch",
+  "description": "Read-only Hermes Kanban workers as live Claude Code workflow rows.",
+  "owner": {
+    "name": "Atlas X AI"
+  },
+  "plugins": [
+    {
+      "name": "hermes-kanban-watch",
+      "source": "./plugin",
+      "version": "0.1.0",
+      "homepage": "https://github.com/Atlas-X-AI/hermes-kanban-watch",
+      "repository": "https://github.com/Atlas-X-AI/hermes-kanban-watch",
+      "description": "Watch Hermes Kanban workers as live, read-only Claude Code workflow rows."
+    }
+  ]
+}

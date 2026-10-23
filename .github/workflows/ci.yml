@@ -1,0 +1,11 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  ci:
+    uses: Atlas-X-AI/.github/.github/workflows/atlas-ci.yml@main
+    secrets: inherit

@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="320" viewBox="0 0 1280 320" role="img" aria-labelledby="title desc">
+  <title id="title">Hermes Kanban Watch</title>
+  <desc id="desc">Live workers. Clear handoffs. Three kanban columns with cards on a black background.</desc>
+  <rect width="1280" height="320" fill="#000000"/>
+  <path d="M64 64H128" stroke="#C9924A" stroke-width="4"/>
+  <text x="64" y="132" fill="#C9924A" font-family="Inter, sans-serif" font-size="52" font-weight="700">Hermes Kanban Watch</text>
+  <text x="66" y="177" fill="#FFFFFF" font-family="Inter, sans-serif" font-size="21">See your Hermes workers, live inside Claude Code.</text>
+  <text x="66" y="249" fill="#F7E3C1" font-family="JetBrains Mono, monospace" font-size="14" letter-spacing="2">READ-ONLY WATCHERS / YOUR MODELS / YOUR BOARD</text>
+  <g stroke="#C9924A" stroke-width="1" fill="#0E0E0E">
+    <rect x="872" y="58" width="100" height="204" rx="10"/>
+    <rect x="988" y="58" width="100" height="204" rx="10"/>
+    <rect x="1104" y="58" width="100" height="204" rx="10"/>
+  </g>
+  <g fill="#F7E3C1" font-family="JetBrains Mono, monospace" font-size="11" text-anchor="middle">
+    <text x="922" y="87">QUEUED</text>
+    <text x="1038" y="87">RUNNING</text>
+    <text x="1154" y="87">NEEDS YOU</text>
+  </g>
+  <g fill="#000000" stroke="#C9924A" stroke-width="1">
+    <rect x="886" y="105" width="72" height="44" rx="5"/>
+    <rect x="886" y="161" width="72" height="44" rx="5"/>
+    <rect x="1002" y="105" width="72" height="60" rx="5"/>
+    <rect x="1118" y="105" width="72" height="44" rx="5"/>
+  </g>
+  <g stroke="#F7E3C1" stroke-width="2" stroke-linecap="round">
+    <path d="M898 119H942M898 130H928M898 175H942M898 186H922M1014 119H1058M1014 130H1040M1130 119H1174M1130 130H1154"/>
+  </g>
+  <circle cx="1018" cy="150" r="4" fill="#C9924A"/>
+  <path d="M1029 150H1058" stroke="#C9924A" stroke-width="2"/>
+  <path d="M1154 167V182M1154 189V191" stroke="#C9924A" stroke-width="3" stroke-linecap="round"/>
+  <path d="M64 290H1216" stroke="#C9924A" stroke-opacity="0.35"/>
+</svg>
