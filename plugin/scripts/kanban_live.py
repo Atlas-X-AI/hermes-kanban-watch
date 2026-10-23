@@ -18,6 +18,11 @@ Subcommands (all read-only; nothing here writes to a board or a session store):
   active     --board B                                JSON {now, cards} for every queued or running card
   cards      --board B [--task T...]                  JSON {now, cards} with parents, creator and model;
                                                      no --task = every queued or running card
+  report     --board B [--task T...] [--since EPOCH] [--format json|text]
+                                                     cards (including finished) and run-time totals
+  verify-pair --board B --worker T --verifier V [--families FILE]
+                                                     compare actual last finished runs, not pins;
+                                                     0 different families, 1 same/unknown, 3 no finished run
   events     --board B --watch id=status,... [--known a,b] --since EPOCH --max-seconds N
                                                      exit 0 + JSON once a watched card files/parents a card
                                                      that is in neither --watch nor --known; 2 = all watched
@@ -42,6 +47,8 @@ Subcommands (all read-only; nothing here writes to a board or a session store):
                                                      parked_for_human whatever its reason, once per park event, board-wide
                                                      (not filtered by --created-by); for the caller's own card it replaces
                                                      the parent item.
+                                                     --loop owns timeout retries with a fixed --since (default: now),
+                                                     and includes existing current waits on its first poll.
 
 Exit codes: 0 reached, 2 nothing left to watch (scout; events: every watched card is done or
 archived) or bad arguments (argparse), 3 time
@@ -66,6 +73,9 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+# Doctor's --version check must not create import caches in the installation.
+sys.dont_write_bytecode = True
 
 def _no_cap_label(conn, task_id, now=None):
     return None
@@ -509,6 +519,118 @@ def cmd_cards(args) -> int:
     return 4 if missing else 0
 
 
+def run_duration(run: dict, now: int) -> int | float | None:
+    """Elapsed wall time, not billed tokens or money. Missing timing stays unknown."""
+    start = run.get("started_at")
+    end = run.get("ended_at")
+    if end is None and run.get("status") == "running":
+        end = now
+    if start is None or end is None:
+        return None
+    return max(0, end - start)
+
+
+def report_text(cards: list[dict], totals: dict, missing: list[str]):
+    fields = ("id", "status", "assignee", "model_used", "provider_used", "fallback_from",
+              "runs", "retried", "duration_s", "warnings", "title")
+    rows = [["ID", "STATUS", "ASSIGNEE", "MODEL_USED", "PROVIDER_USED", "FALLBACK_FROM",
+             "RUNS", "RETRIED", "DURATION_S", "WARNINGS", "TITLE"]]
+    for card in cards:
+        values = {**card, "retried": "yes" if card["retried"] else "no",
+                  "warnings": ",".join(f"{k}={v}" for k, v in card["warnings"].items()) or "-"}
+        # A title or assignee must not introduce another table row or terminal control.
+        rows.append([" ".join("".join(c if c.isprintable() else " " for c in str(values[f])).split())
+                     if values[f] is not None else "-" for f in fields])
+    widths = [max(len(row[i]) for row in rows) for i in range(len(fields))]
+    for row in rows:
+        print("  ".join(value.ljust(width) for value, width in zip(row, widths)).rstrip())
+    print("Totals: " + " ".join(f"{k}={v}" for k, v in totals["by_status"].items())
+          + f"  run_seconds={totals['run_seconds']}  fell_back={totals['fell_back']}  retried={totals['retried']}")
+    if missing:
+        print("Missing: " + ", ".join(missing))
+
+
+def cmd_report(args) -> int:
+    now = int(time.time())
+    cards = []
+    totals = {"by_status": {}, "run_seconds": 0, "fell_back": 0, "retried": 0}
+    with connect(board_db(args.board)) as conn:
+        conn.execute("begin")
+        filters, params = [], []
+        if args.task:
+            filters.append(f"id in ({','.join('?' * len(args.task))})")
+            params.extend(args.task)
+        if args.since is not None:
+            filters.append("created_at >= ?")
+            params.append(args.since)
+        where = " where " + " and ".join(filters) if filters else ""
+        rows = conn.execute("select id, title, status, assignee from tasks" + where
+                            + " order by created_at, id", params).fetchall()
+        for row in rows:
+            runs = [dict(r) for r in conn.execute(
+                "select id, status, model_used, provider_used, fallback_from, started_at, ended_at"
+                " from task_runs where task_id = ? order by id", (row["id"],))]
+            last = runs[-1] if runs else None
+            card = {**dict(row), **{k: last[k] if last else None
+                                    for k in ("model_used", "provider_used", "fallback_from")},
+                    "runs": len(runs), "retried": was_retried(conn, row["id"]),
+                    "duration_s": run_duration(last, now) if last else None,
+                    "warnings": run_warnings(conn, row["id"], last)}
+            cards.append(card)
+            totals["by_status"][row["status"]] = totals["by_status"].get(row["status"], 0) + 1
+            totals["run_seconds"] += sum(run_duration(run, now) or 0 for run in runs)
+            totals["fell_back"] += int(any(run["fallback_from"] for run in runs))
+            totals["retried"] += int(card["retried"])
+        # A since-filtered existing card is not missing; missing means absent from the board.
+        missing = [task for task in dict.fromkeys(args.task or []) if not conn.execute(
+            "select 1 from tasks where id = ?", (task,)).fetchone()]
+    if args.format == "text":
+        report_text(cards, totals, missing)
+    else:
+        print(json.dumps({"read_status": "OK", "now": now, "cards": cards, "totals": totals,
+                          "missing": missing}, ensure_ascii=False))
+    return 4 if missing else 0
+
+
+def cmd_verify_pair(args) -> int:
+    pair = {}
+    with connect(board_db(args.board)) as conn:
+        conn.execute("begin")
+        for role, task in (("worker", args.worker), ("verifier", args.verifier)):
+            run = conn.execute(
+                "select id as run_id, model_used, provider_used from task_runs"
+                " where task_id = ? and ended_at is not null order by id desc limit 1", (task,)).fetchone()
+            pair[role] = {"id": task, **dict(run), "family": None} if run else {"id": task, "family": None}
+    out = {"read_status": "OK", **pair, "different_families": None}
+    if any("run_id" not in run for run in pair.values()):
+        print(json.dumps({**out, "error": "A card has no finished run"}))
+        return 3
+    try:
+        # Reuse exactly the router's file precedence and dependency-free YAML/JSON parser.
+        spec = importlib.util.spec_from_file_location(
+            "_kanban_pair_routes", Path(__file__).resolve().with_name("route.py"))
+        if spec is None or spec.loader is None:
+            raise ImportError("no routes loader")
+        route = importlib.util.module_from_spec(spec)
+        with contextlib.redirect_stdout(sys.stderr):
+            spec.loader.exec_module(route)
+        providers = route.read_mapping(route.routes_path(args.families)).get("providers")
+        if not isinstance(providers, dict) or not providers or any(
+                not route.safe_identifier(k) or not route.safe_identifier(v) for k, v in providers.items()):
+            raise ValueError("invalid providers")
+        for run in pair.values():
+            if not run["model_used"] or not run["provider_used"]:
+                raise ValueError("missing actual model/provider")
+            run["family"] = providers[run["provider_used"]]
+    except (OSError, UnicodeError, ValueError, KeyError, ImportError):
+        # Do not echo a routes file or parser excerpts, which might contain a pasted key.
+        print(json.dumps({**out, "error": "Cannot classify actual runs: check model/provider and routes providers mapping"}))
+        return 1
+    different = pair["worker"]["family"] != pair["verifier"]["family"]
+    print(json.dumps({**out, "different_families": different}))
+    return 0 if different else 1
+
+
 def cmd_wait_any(args) -> int:
     """One read transaction per poll, no per-card process or cursor. Terminal exits count too."""
     tasks = list(dict.fromkeys(args.task))
@@ -775,7 +897,8 @@ def write_seen(path: Path, seen: dict[str, float]):
 
 
 def needs_items(board: str, since: int, ready_stale: int, ready_stale_capped: int = 0,
-                *, created_by: str | None = None, loop_runs: int = 6) -> list[dict]:
+                *, created_by: str | None = None, loop_runs: int = 6,
+                include_waiting_before: bool = False) -> list[dict]:
     items = []
     if ready_stale and dispatcher_state(board) == "active":
         # A running board runner at its --max makes ready cards wait for a slot; that is normal.
@@ -800,8 +923,11 @@ def needs_items(board: str, since: int, ready_stale: int, ready_stale_capped: in
                 f"select e.id, e.task_id, e.kind, e.payload, e.created_at, t.title, t.status,"
                 f" {creator_column} as created_by"
                 " from task_events e left join tasks t on t.id = e.task_id"
-                " where e.created_at >= ? and e.kind in ('blocked', 'dependency_wait', 'block_loop_detected')"
-                " order by e.id", (since,)):
+                " where (e.created_at >= ? or ?) and e.kind in ('blocked', 'dependency_wait', 'block_loop_detected')"
+                " order by e.id", (since, include_waiting_before)):
+            # Only bootstrap standing waits, not old questions already answered or superseded.
+            if r["created_at"] < since and not wait_in_force(conn, r["task_id"], r["id"]):
+                continue
             try:
                 reason = (json.loads(r["payload"] or "{}") or {}).get("reason") or ""
             except (ValueError, AttributeError):
@@ -860,6 +986,7 @@ def cmd_needs(args) -> int:
     seen_path = CURSOR_DIR / f"{args.board or 'default'}-needs{('-' + args.cursor_key) if args.cursor_key else ''}.seen"
     seen = read_seen(seen_path)
     deadline = time.time() + args.max_seconds
+    first_poll = True
     while True:
         now = time.time()
         # waiting: keys repeat at most once per WAIT_REPEAT per card. loop: keys do too, while
@@ -881,12 +1008,14 @@ def cmd_needs(args) -> int:
                     and item["at"] > seen[key])
         try:
             items = [i for i in needs_items(args.board, args.since, args.ready_stale, args.ready_stale_capped,
-                                           created_by=args.created_by, loop_runs=args.loop_runs)
+                                           created_by=args.created_by, loop_runs=args.loop_runs,
+                                           include_waiting_before=args.loop and first_poll)
                      if fresh(i)]
             items = list({i["key"]: i for i in items}.values())
         except sqlite3.Error as exc:
             print(json.dumps({"error": f"board unreadable: {exc}"}))
             return 5
+        first_poll = False
         if items:
             seen.update({i["key"]: now for i in items})
             write_seen(seen_path, seen)
@@ -899,8 +1028,11 @@ def cmd_needs(args) -> int:
             print(json.dumps(out))
             return 0
         if time.time() >= deadline:
-            print(json.dumps({"now": int(time.time()), "items": [], "timeout": True}))
-            return 3
+            if not args.loop:
+                print(json.dumps({"now": int(time.time()), "items": [], "timeout": True}))
+                return 3
+            # Own the exit-3 retry, but never move args.since or retry any other exit.
+            deadline = time.time() + args.max_seconds
         time.sleep(args.interval)
 
 
@@ -946,6 +1078,9 @@ def observation_error(exc) -> int:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    manifest = Path(__file__).resolve().parents[1] / ".claude-plugin/plugin.json"
+    version = json.loads(manifest.read_text(encoding="utf-8"))["version"]
+    parser.add_argument("--version", action="version", version=f"hermes-kanban-watch {version}")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     def common(p, many=False):
@@ -962,6 +1097,16 @@ def main(argv=None) -> int:
     p.add_argument("--task", action="append")
     p.add_argument("--stale-days", type=float, default=7,
                    help="skip older queued cards on unscoped board watches; 0 disables (explicit ids always kept)")
+    p = sub.add_parser("report")
+    p.add_argument("--board", default="default")
+    p.add_argument("--task", action="append")
+    p.add_argument("--since", type=int, help="include cards created at or after this epoch")
+    p.add_argument("--format", choices=("json", "text"), default="json")
+    p = sub.add_parser("verify-pair")
+    p.add_argument("--board", default="default")
+    p.add_argument("--worker", required=True)
+    p.add_argument("--verifier", required=True)
+    p.add_argument("--families", help="routes file with a providers-to-model-family mapping")
     p = sub.add_parser("events")
     common(p)
     p.add_argument("--watch", required=True, help="id=status,id=status as last seen")
@@ -996,7 +1141,8 @@ def main(argv=None) -> int:
     p.add_argument("--since", type=int, required=True)
     p = sub.add_parser("needs")
     common(p)
-    p.add_argument("--since", type=int, required=True, help="only comments, events and runs from this epoch on")
+    p.add_argument("--since", type=int, help="only comments, events and runs from this epoch on; --loop defaults to now")
+    p.add_argument("--loop", action="store_true", help="retry timeouts with a fixed since; first poll includes existing waits")
     p.add_argument("--created-by", help="also wake for this creator's blocked/waiting cards: once per card, then hourly"
                         " while it is unfinished and still waiting again; filter respawn loops to this creator")
     p.add_argument("--loop-runs", type=int, default=6,
@@ -1008,6 +1154,13 @@ def main(argv=None) -> int:
     p.add_argument("--cursor-key", default="", help="separate seen-list per waker")
 
     args = parser.parse_args(argv)
+    if args.cmd == "needs":
+        if args.since is None:
+            if not args.loop:
+                parser.error("needs requires --since without --loop")
+            args.since = int(time.time())
+        if args.loop and (args.interval <= 0 or args.max_seconds < 0):
+            parser.error("needs --loop requires --interval > 0 and --max-seconds >= 0")
     if args.cmd == "needs" and args.loop_runs < 0:
         parser.error("--loop-runs must be non-negative")
     if args.cmd == "cards" and (not math.isfinite(args.stale_days) or args.stale_days < 0):
@@ -1021,7 +1174,8 @@ def main(argv=None) -> int:
     try:
         return {"snapshot": cmd_snapshot, "cards": cmd_cards, "events": cmd_events, "active": cmd_active, "wait-start": cmd_wait_start,
                 "wait-any": cmd_wait_any,
-                "follow": cmd_follow, "scout": cmd_scout, "needs": cmd_needs}[args.cmd](args)
+                "follow": cmd_follow, "scout": cmd_scout, "needs": cmd_needs,
+                "report": cmd_report, "verify-pair": cmd_verify_pair}[args.cmd](args)
     except sqlite3.Error as exc:
         return observation_error(exc)
 

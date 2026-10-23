@@ -476,6 +476,7 @@ def run() -> int:
         + json.dumps({"board": board, "tasks": cards})
         + ". Use one watcher for the whole wave; add phases when its stages are known. "
         "Skip this if a watcher already covers these cards, or a watched card filed them. "
+        "The workflow uses hermes-kanban-watch:kanban-watcher and hermes-kanban-live. "
         "Watchers only read; they never dispatch."
     )
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": note}}))

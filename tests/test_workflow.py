@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -24,7 +25,7 @@ def test_workflow_module_parse(tmp_path):
     assert out.returncode == 0, out.stderr
     source = (PLUGIN / "workflows/kanban-watch.js").read_text()
     assert source.startswith("// Read-only Kanban watchers:")
-    assert "kanban-live" in source and "live_cmd" in source
+    assert "hermes-kanban-live" in source and "live_cmd" in source
     assert "const WAKE = 270" in source
 
 
@@ -60,10 +61,36 @@ def test_workflow_default_and_override_real_commands(tmp_path):
     out = run_workflow(tmp_path, {"tasks": ["t_1234abcd"]})
     assert out["result"]["read_status"] == "OK"
     assert out["result"]["cards"][0]["verdict"] == "DONE"
-    assert "`kanban-live cards" in out["calls"][0]["prompt"]
-    assert all(c["options"]["agentType"] == "kanban-watcher" for c in out["calls"])
+    assert "`hermes-kanban-live cards" in out["calls"][0]["prompt"]
+    assert all(c["options"]["agentType"] == "hermes-kanban-watch:kanban-watcher" for c in out["calls"])
     out = run_workflow(tmp_path, {"live_cmd": "python3 ~/plugin/scripts/kanban_live.py"})
     assert "`python3 ~/plugin/scripts/kanban_live.py cards" in out["calls"][0]["prompt"]
+
+
+def test_workflow_agent_types_are_namespaced_or_overridden(tmp_path):
+    source = (PLUGIN / "workflows/kanban-watch.js").read_text()
+    values = re.findall(r"agentType:\s*([^,}\n]+)", source)
+    assert values and all(value in {"AGENT_TYPE", "options.agentType"} for value in values), values
+    out = run_workflow(tmp_path, {})
+    assert out["calls"] and out["result"]["read_status"] == "OK"
+    assert all(call["options"]["agentType"] == "hermes-kanban-watch:kanban-watcher"
+               for call in out["calls"])
+
+
+@pytest.mark.parametrize("agent_type", ["local_watcher-2", "other-plugin:watcher_2", "A1:B2"])
+def test_workflow_agent_type_override(tmp_path, agent_type):
+    out = run_workflow(tmp_path, {"agent_type": agent_type})
+    assert out["calls"] and out["result"]["read_status"] == "OK"
+    assert all(call["options"]["agentType"] == agent_type for call in out["calls"])
+
+
+@pytest.mark.parametrize("agent_type", ["", ":watcher", "plugin:", "a:b:c", "a/b", "a.b",
+                                        "watcher;id", "two words", "watcher\n", "watcher\r",
+                                        "watcher\t", "é", None, 12, {}])
+def test_workflow_agent_type_validation(tmp_path, agent_type):
+    out = run_workflow(tmp_path, {"agent_type": agent_type})
+    assert "agent_type" in out["result"]["error"]
+    assert not out["calls"]
 
 
 @pytest.mark.parametrize("command", ["kanban-live;id", "x\nwhoami", "$(id)", "x|cat", "x>out", "x&y", "", 12])
@@ -82,14 +109,15 @@ def test_workflow_unknown_envelope_cannot_become_done(tmp_path, scenario):
 
 def test_public_contract_metadata_agent_skill_hooks():
     manifest = json.loads((PLUGIN / ".claude-plugin/plugin.json").read_text())
-    assert manifest["name"] == "hermes-kanban-watch" and manifest["version"] == "0.1.0"
+    assert manifest["name"] == "hermes-kanban-watch" and manifest["version"] == "0.2.0"
     assert manifest["author"]["name"] and manifest["description"]
     hook = json.loads((PLUGIN / "hooks/hooks.json").read_text())["hooks"]["PostToolUse"][0]
     assert hook["matcher"] == "Bash"
     assert "${CLAUDE_PLUGIN_ROOT}/hooks/kanban_watch_nudge.py" in hook["hooks"][0]["command"]
     agent = (PLUGIN / "agents/kanban-watcher.md").read_text()
     assert "tools: Bash, Read" in agent and "model: sonnet" in agent and "## Never" in agent
-    assert "kanban-live follow" in agent and "UNKNOWN" in agent
+    assert "hermes-kanban-live follow" in agent and "UNKNOWN" in agent
+    assert "agentType hermes-kanban-watch:kanban-watcher" in agent
     skill = (PLUGIN / "skills/kanban-watch/SKILL.md").read_text()
     assert len(skill.splitlines()) <= 150 and "/kanban-watch" in skill
     readme = (ROOT / "README.md").read_text()
@@ -97,13 +125,32 @@ def test_public_contract_metadata_agent_skill_hooks():
         assert "Checked against a real Hermes Agent v0.21.2 board" in document
         assert "`tests/test_real_hermes.py`; CI uses a fake Hermes CLI" in document
         assert 'hermes kanban boards create demo\nhermes kanban --board demo create "Build the feature" --assignee builder' in document
-        assert "--title" not in document
+        # Only the upstream CLI uses a positional title. file_card.py owns --title.
+        hermes_commands = re.findall(r"hermes kanban[^\n`]*", document)
+        assert hermes_commands and all("--title" not in command for command in hermes_commands)
     for document in (readme, (PLUGIN / "README.md").read_text(), skill,
                      (ROOT / "SECURITY.md").read_text()):
         assert "hermes kanban --board default init" in document
         assert "hermes kanban boards create <slug>" in document
     assert 'hermes kanban --board demo create "Build the feature" --assignee builder' in skill
     assert "--plugin-dir" in readme and "--fix" in readme and "subscription" in readme
+
+
+@pytest.mark.parametrize("document_path", ["README.md", "plugin/README.md"])
+def test_public_contract_rejects_inline_title_flag(tmp_path, monkeypatch, document_path):
+    test_public_contract_metadata_agent_skill_hooks()  # The unmodified documents must pass.
+    original = ROOT / document_path
+    copy = tmp_path / "README.md"
+    copy.write_text(original.read_text() +
+                    '\nFor example, run `hermes kanban --board demo create --title "X"` to file work.\n')
+    read_text = Path.read_text
+
+    def planted_read_text(path, *args, **kwargs):
+        return read_text(copy if path == original else path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", planted_read_text)
+    with pytest.raises(AssertionError):
+        test_public_contract_metadata_agent_skill_hooks()
 
 
 @pytest.mark.parametrize("command", ["kanban-live\n", "kanban-live\r", "kanban-live\t"])
@@ -113,11 +160,13 @@ def test_workflow_rejects_trailing_control_characters(tmp_path, command):
 
 
 @pytest.mark.parametrize("scenario", ["waiting", "resume", "new", "ignore-new"])
-def test_workflow_state_machine(tmp_path, scenario):
+@pytest.mark.parametrize("agent_type", [None, "custom:watcher"])
+def test_workflow_state_machine(tmp_path, scenario, agent_type):
     module_copy(tmp_path)
     harness = tmp_path / "watch.mjs"
     harness.write_text((ROOT / "tests/watch_scenarios.mjs").read_text())
-    out = subprocess.run(["node", str(harness), scenario], capture_output=True, text=True, timeout=10)
+    out = subprocess.run(["node", str(harness), scenario, json.dumps(agent_type)],
+                         capture_output=True, text=True, timeout=10)
     assert out.returncode == 0, out.stderr
     data = json.loads(out.stdout)
     assert data["result"]["read_status"] == "OK"

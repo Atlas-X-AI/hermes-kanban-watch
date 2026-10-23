@@ -1,6 +1,7 @@
 // Deterministic external-agent replies exercise the real workflow state machine.
 import {run} from './workflow.mjs';
 const scenario = process.argv[2];
+const agentType = JSON.parse(process.argv[3]);
 const make = (id, status, parents = []) => ({id, status, parents, title:id, runs:1, retried:false});
 const one = make('t_one', scenario === 'resume' ? 'blocked' : scenario === 'waiting' ? 'ready' : 'running');
 const two = make('t_two', scenario === 'waiting' ? 'ready' : 'done');
@@ -10,9 +11,13 @@ const flagSeen = new Promise(r => {flagResolve = r});
 const secondSeen = new Promise(r => {secondResolve = r});
 const envelope = data => ({read_status:'OK',now:101,...data});
 const result = await run({
+  ...(agentType === null ? {} : {agent_type:agentType}),
   follow_new: scenario !== 'ignore-new', max_hours: 1,
   phases: [{title:'Build',tasks:['t_one','t_two']}],
 }, async (prompt, options) => {
+  if (options.agentType !== (agentType ?? 'hermes-kanban-watch:kanban-watcher')) {
+    throw Error(`Unexpected agentType: ${options.agentType}`);
+  }
   prompts.push(prompt);
   if (options.schema.properties.count) {
     return envelope({cards:scenario === 'waiting' ? [one,two] : [one], count:scenario === 'waiting' ? 2 : 1, stale_skipped:[]});

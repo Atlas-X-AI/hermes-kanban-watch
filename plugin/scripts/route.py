@@ -67,7 +67,7 @@ def read_mapping(path):
             stack.pop()
         if not stack or stack[-1][0] != indent - 2:
             raise ValueError(f"Invalid routes nesting at line {number}")
-        match = re.fullmatch(r"([A-Za-z0-9_.-]+):(?:\s+(.*))?", line.strip())
+        match = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9._/@:+-]{0,127}):(?:\s+(.*))?", line.strip())
         if not match:
             raise ValueError(f"Expected routes mapping at line {number}")
         key, raw = match.groups()
@@ -81,6 +81,22 @@ def read_mapping(path):
             parent[key] = scalar(raw)
         previous_indent = indent
     return root
+
+
+def mapping_text(mapping, indent=0):
+    """Serialize the same identifier-only mapping subset that read_mapping accepts."""
+    lines = []
+    for key, value in mapping.items():
+        if not safe_identifier(key):
+            raise ValueError("Invalid routes mapping key")
+        prefix = " " * indent + key + ":"
+        if isinstance(value, dict):
+            lines.append(prefix + "\n" + mapping_text(value, indent + 2))
+        elif safe_identifier(value):
+            lines.append(prefix + " " + json.dumps(value) + "\n")
+        else:
+            raise ValueError("Invalid routes mapping value")
+    return "".join(lines)
 
 
 def routes_path(explicit=None):

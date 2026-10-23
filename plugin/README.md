@@ -1,4 +1,4 @@
-# hermes-kanban-watch 0.1.0
+# hermes-kanban-watch 0.2.0
 
 For marketplace installation, setup and the complete guide, see the
 [repository README](https://github.com/Atlas-X-AI/hermes-kanban-watch#readme).
@@ -7,11 +7,13 @@ A Claude Code plugin that shows Hermes Kanban cards as live workflow rows. One
 row follows each running worker, queued cards share a waiting row per stage, and
 blocked, review or otherwise unfinished results appear under Needs you. Newly
 filed children can join the watch; blocked/review cards can resume and re-arm.
-It is a reader, not a dispatcher or a second owner of the work.
+The watch path is a reader, not a dispatcher or a second owner of the work.
+The separate, explicitly invoked `file_card.py` command can create a routed card.
 
 Checked against a real Hermes Agent v0.21.2 board on Linux with the opt-in
 `tests/test_real_hermes.py`; CI uses a fake Hermes CLI. The real check exercises
-board/card creation, cards/snapshot reads and named-board doctor `--fix`, not
+board/card creation, routed filing with model pin/read-back, cards/snapshot reads
+and named-board doctor `--fix`, not
 worker dispatch, live models or the Claude Code UI.
 
 The compatibility target is the supplied working reader and its SQLite schema;
@@ -63,7 +65,11 @@ python3 /path/to/hermes-kanban-watch/plugin/scripts/doctor.py --board default
 Doctor prints PASS / FAIL / UNKNOWN for each check and a summary. Exit 0 means no
 FAILs, not that UNKNOWNs were verified. Without flags, it only checks Hermes's
 version, the board file, the two model keys in each profile config, route profile
-existence and `kanban-live` on PATH. It never opens `.env`, `auth.json`, sessions
+existence and `hermes-kanban-live` on PATH. Its `--version` must print exactly
+`hermes-kanban-watch 0.2.0`. A foreign or stale command is FAIL with its resolved
+path shown; move it aside or correct PATH, then rerun `--fix`, or set `args.live_cmd`
+to this plugin's reader. Existing unrelated `kanban-live` commands are not used
+or changed. It never opens `.env`, `auth.json`, sessions
 or other credential files. It does not echo arbitrary subprocess output or values
 that resemble keys. Unsupported profile config shapes are UNKNOWN.
 
@@ -78,7 +84,7 @@ python3 /path/to/hermes-kanban-watch/plugin/scripts/doctor.py --board default
 `--fix` initialises a missing default board via `hermes kanban --board default init`
 or a missing named board via `hermes kanban boards create <slug>`,
 copies the route template to `~/.config/hermes-kanban-watch/routes.yaml`, and
-creates an executable `~/.local/bin/kanban-live` shim that execs this installed
+creates an executable `~/.local/bin/hermes-kanban-live` shim that execs this installed
 reader with the original arguments. Existing files, including symlinks, are left
 alone and reported. Keep the plugin in place: the shim points to that install.
 Doctor cannot change the caller's PATH; after installation it reports UNKNOWN
@@ -93,6 +99,33 @@ python3 /path/to/hermes-kanban-watch/plugin/scripts/doctor.py --probe --timeout 
 Each distinct profile/model/provider in the routes is invoked once with
 `hermes -p <profile> chat -Q -q "Reply with the single word PONG and stop." -m <model> --provider <provider>`.
 Only a successful, exactly PONG response passes. Error output is not relayed.
+
+### Suggest routes from passing models
+
+```sh
+python3 /path/to/hermes-kanban-watch/plugin/scripts/doctor.py --board demo --routes /path/to/routes.yaml --probe --suggest-routes /path/to/routes-checked.yaml
+```
+
+`--suggest-routes FILE` requires `--probe` and a new destination. Existing files,
+directories and symlinks are refused, including a file created while probes run.
+It writes a proposal, never replaces the source routes or activates a fallback.
+Review the proposal before selecting it with `--routes` or `KANBAN_WATCH_ROUTES`.
+Changing a lane can change the profile, provider and cost, not only the model.
+
+Every worker and verifier written in a route must have passed this invocation's
+exact PONG check. Passing workers are retained; failed workers use the first
+passing lane in probe order (profile, model, provider, sorted lexicographically).
+The existing verifier is retained if it passed and belongs to a different family;
+otherwise the first passing different-family lane is used. Family identity comes
+from your `providers` mapping, so different API hosts are not necessarily independent.
+No new profile/model/provider triple is invented. Classes with no passing worker
+and different-family verifier are omitted and named in comments. If none qualify,
+the file has empty class/verifier mappings and cannot be used for filing.
+
+Comments record the UTC timestamp, source routes path and PASS/FAIL for every
+distinct lane. A generated file does not clear the original doctor's failures:
+exit 1 still means a setup/probe check failed, even if suggestions were written.
+A PONG is an availability observation, not proof of suitability or future capacity.
 
 ## Bring your own models and keys
 
@@ -121,6 +154,44 @@ worker; dispatch through Hermes separately. After Bash create/swarm, the hook
 suggests `/kanban-watch` with the newly created ids and board. It only adds
 context and never blocks, starts a workflow, dispatches or edits a card.
 
+### File one routed card
+
+```sh
+python3 /path/to/hermes-kanban-watch/plugin/scripts/file_card.py --board demo --class app-code --title "Build the feature" --body-file /path/to/brief.txt --routes /path/to/routes-checked.yaml --worktree /absolute/path/to/worktree
+```
+
+Only `--board`, `--class`, `--title` and `--body-file` are required. Routes use the
+same selection precedence as `route.py`; `--worktree DIR` requests Hermes's
+`--workspace worktree:<absolute-path>` without creating the directory itself.
+Missing/unreadable body files, unknown classes, invalid routes and missing boards
+are refused before creating anything. For a missing board it names
+`hermes kanban boards create <board>`; it never creates the board implicitly.
+
+The script asks `route.py` for the worker and different-family verifier, creates
+one worker card using Hermes's positional title and `--assignee`, then calls
+`set-model <id> <model> --provider <provider>`. Creation also carries the same pin
+to avoid a race with an already-active dispatcher. It reads the card back with
+`show <id> --json` and checks the title, body, assignee, pin and requested worktree.
+Only after that succeeds does it print the card id and the exact command to paste:
+
+```text
+Card: t_1234abcd
+/kanban-watch {"board":"demo","tasks":["t_1234abcd"]}
+```
+
+Add `--dry-run` to print shell-quoted create, set-model and show commands without
+running Hermes or creating anything; `<card-id>` is a placeholder in those commands.
+Dry-run still validates the input files, routes and board. The commands include
+the brief's text, so do not put secrets in the brief or share its output carelessly.
+The script never opens profile configs or credential files. If pinning/read-back
+fails after creation, it reports the existing id and a show command; inspect that
+card instead of refiling and creating a duplicate.
+
+This command does not create a verifier card, start a dispatcher or launch Workflow.
+Paste the emitted `/kanban-watch` command in Claude Code to start watching. Filing
+is separate from the watcher's read-only permissions; do not grant a watcher create
+or set-model access.
+
 In Claude Code, provide JSON args to the skill:
 
 ```text
@@ -137,11 +208,15 @@ ids always stay. Options:
 - `max_hours` (default 12): board-event watch budget; 270-second reader wakes.
 - `verbose` (default false): legacy worker text/tool results instead of compact output.
 - `ready_stale` (default 900): seconds ready before flagging NOT_STARTING.
-- `live_cmd` (default `kanban-live`): safe reader override, e.g.
+- `live_cmd` (default `hermes-kanban-live`): safe reader override, e.g.
   `python3 ~/plugins/hermes-kanban-watch/plugin/scripts/kanban_live.py`.
   Only letters, digits, spaces, `/`, `.`, `_`, `-`, `~` are allowed. No quoting,
   shell operators, substitution or newline. For paths containing spaces, use a
   PATH shim rather than building a quoted shell command.
+- `agent_type` (default `hermes-kanban-watch:kanban-watcher`): the plugin's
+  namespaced agent for every workflow row. No private user agent is required.
+  Overrides allow ASCII letters, digits, `-`, `_`, and one optional `:` between
+  non-empty names, and must name an agent available in your Claude Code install.
 
 Running cards get one live row. Shared waiting rows cover queues; safe parent
 DONE reports release child rows without an extra idle agent. Blocks/reviews get
@@ -158,15 +233,15 @@ Doctor prints these exact allowlist entries (add them through Claude Code's
 permission UI/settings if needed). Do not approve all Bash commands for a watcher:
 
 ```text
-Bash(kanban-live cards:*)
-Bash(kanban-live snapshot:*)
-Bash(kanban-live wait-start:*)
-Bash(kanban-live wait-any:*)
-Bash(kanban-live follow:*)
-Bash(kanban-live events:*)
-Bash(kanban-live active:*)
-Bash(kanban-live scout:*)
-Bash(kanban-live needs:*)
+Bash(hermes-kanban-live cards:*)
+Bash(hermes-kanban-live snapshot:*)
+Bash(hermes-kanban-live wait-start:*)
+Bash(hermes-kanban-live wait-any:*)
+Bash(hermes-kanban-live follow:*)
+Bash(hermes-kanban-live events:*)
+Bash(hermes-kanban-live active:*)
+Bash(hermes-kanban-live scout:*)
+Bash(hermes-kanban-live needs:*)
 ```
 
 A `live_cmd` override requires corresponding permissions for that command.
@@ -219,3 +294,82 @@ The opt-in real-Hermes check uses the real CLI in disposable homes; it is skippe
 unless `HERMES_KANBAN_WATCH_REAL=1` and Hermes is on PATH.
 The module parse check retains the metadata export and wraps the complete
 Workflow async body, not a stripped stub. No live profiles or models are tested.
+
+### Wave time and actual-run report
+
+Use the installed reader, or replace `hermes-kanban-live` with
+`python3 <plugin-root>/scripts/kanban_live.py`:
+
+```sh
+hermes-kanban-live report --board demo
+hermes-kanban-live report --board demo --task t_1234abcd --task t_11111111
+hermes-kanban-live report --board demo --since 1792700000 --format text
+```
+
+JSON is one envelope with `read_status`, `now`, `cards`, `totals` and `missing`.
+Each card object has `id`, `title`, `status`, `assignee`, `model_used`,
+`provider_used`, `fallback_from`, `runs`, `retried`, `duration_s` and `warnings`.
+Model/provider/fallback, duration and warning counts describe the newest run by
+run id, never the card's pin. No run means null model/timing, zero runs and empty
+warnings. `retried` uses the reader's conservative retry guard: multiple runs or
+a blocked/unblocked/gave-up/timed-out/crashed/changes-requested event.
+
+Without `--task`, all cards are included, even finished or archived ones.
+Repeated `--task` ids select a set. `--since` selects cards created at or after
+that epoch; combined filters intersect. Runs are not time-clipped: `totals`
+contains `by_status`, `run_seconds` across every run of the selected cards,
+`fell_back` (cards with a fallback on any run), and `retried` (cards, not attempts).
+Running durations use the report's `now`; missing timing stays null and is
+excluded from the seconds total. Durations are elapsed seconds, not token counts
+or a currency estimate. `--format text` prints aligned columns and a totals line,
+without Markdown. Exit 4 means an explicit id is absent from the board (not merely
+filtered out by `--since`); exit 5 means the board could not be read.
+
+### Verify the families that actually ran
+
+```sh
+hermes-kanban-live verify-pair --board demo --worker t_1234abcd --verifier t_11111111
+hermes-kanban-live verify-pair --board demo --worker t_1234abcd --verifier t_11111111 --families /path/to/routes.yaml
+```
+
+The JSON result names each card's latest **finished** run (`ended_at` is set),
+its `run_id`, `model_used`, `provider_used` and configured `family`, plus
+`different_families`. A newer unfinished run is not a finished review. No profile
+config or model pin is read. The actual run's `provider_used` is looked up in the
+routes file's `providers` mapping; this is a configured model-family assertion,
+not a guess from an API hostname or model-name prefix. Map hosts serving the same
+family alike, and use family-specific identifiers for multi-family hosts.
+
+File precedence is `--families`, `KANBAN_WATCH_ROUTES`, the user routes file, then
+the shipped template, exactly as for `route.py`. YAML/JSON parsing is shared with
+the router; only a non-empty, valid `providers` mapping is required here.
+Exit 0 means different known families, 1 means the same family **or classification
+failed**, 3 means either card has no finished run (including an absent id), and 5
+means unreadable board. On classification failure `different_families` is null
+and `error` explains the failure; never treat that as independence. A family
+comparison does not prove the verifier actually inspected the deliverable.
+
+### Arm needs once with its own timeout loop
+
+```sh
+hermes-kanban-live needs --board demo --loop --created-by my-parent-session --cursor-key my-wave
+hermes-kanban-live needs --board demo --loop --since 1792700000 --created-by my-parent-session
+```
+
+`--loop` consumes normal exit-3 timeout windows internally, sleeping at
+`--interval` (default 15 seconds) and keeping the original `--since` throughout.
+If omitted, `--since` is captured once when the command starts. The first poll
+also considers older blocked/dependency-wait/park events whose wait is still in
+force, so an already-waiting card from `--created-by` can immediately produce a
+`parent_question`. Answered, resumed or superseded old waits are not replayed.
+Existing seen-cursor deduplication still applies; use a distinct `--cursor-key`
+for an independent caller.
+
+The command exits 0 with the first non-empty `{now, items}` result. It does not
+retry unreadable boards, permission failures or any other error, and it does not
+dispatch, answer or modify a card. `--max-seconds` is a retry-window size, not an
+overall lifetime limit in loop mode; stop the caller to cancel an uneventful
+watch. Without `--loop`, `--since` remains required and timeout/output behaviour
+is unchanged. Direct Claude Code use of the new report/pair commands needs narrow
+`Bash(hermes-kanban-live report:*)` and `Bash(hermes-kanban-live verify-pair:*)`
+permissions; the existing needs permission covers `--loop`.

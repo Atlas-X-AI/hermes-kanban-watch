@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Read-only setup checks. --probe calls models; --fix opts in to local setup writes."""
+"""Setup checks. --probe calls models; --fix/--suggest-routes opt in to local writes."""
 from __future__ import annotations
 
 import argparse
 from collections import Counter
+from datetime import datetime, timezone
+import json
 import os
 from pathlib import Path
 import re
@@ -15,7 +17,7 @@ import sys
 # Checking an installation must not create import caches in that installation.
 sys.dont_write_bytecode = True
 
-from route import TEMPLATE, load_routes, resolve, safe_identifier, scalar
+from route import TEMPLATE, load_routes, mapping_text, resolve, routes_path, safe_identifier, scalar
 
 SUBCOMMANDS = ("cards", "snapshot", "wait-start", "wait-any", "follow", "events", "active", "scout", "needs")
 PROMPT = "Reply with the single word PONG and stop."
@@ -72,11 +74,51 @@ def exclusive_file(path, content, mode=0o600):
         stream.write(content)
 
 
+def lane(entry):
+    return tuple(entry[key] for key in ("profile", "model", "provider"))
+
+
+def suggested_routes(data, results, source):
+    """Retain working routes, replacing unavailable lanes in probe order.
+
+    Both halves of every emitted pair must have passed this run, and provider
+    aliases never count as different model families. No unprobed lane is invented.
+    """
+    passing = [entry for entry, passed in results.items() if passed]
+    providers = data["providers"]
+    classes, verifiers, omitted = {}, {}, []
+    for name, original in data["classes"].items():
+        preferred = lane(original)
+        candidates = ([preferred] if results.get(preferred) else []) + passing
+        for worker in candidates:
+            family = providers[worker[2]]
+            configured = data["verifiers"].get(family)
+            preferred_verifier = lane(configured) if configured else None
+            choices = ([preferred_verifier] if preferred_verifier is not None and results.get(preferred_verifier) else []) + passing
+            verifier = next((entry for entry in choices if providers[entry[2]] != family), None)
+            if verifier is not None:
+                keys = ("profile", "model", "provider")
+                classes[name] = dict(zip(keys, worker))
+                verifiers[family] = dict(zip(keys, verifier))
+                break
+        else:
+            omitted.append(name)
+    stamp = datetime.now(timezone.utc).isoformat()
+    lines = [f"# PONG probe results at {stamp} UTC", f"# Source routes: {json.dumps(str(source))}",
+             "# Order: profile, model, provider (lexicographic); exact successful PONG only."]
+    for entry, passed in results.items():
+        lines.append(f"# {'PASS' if passed else 'FAIL'} " + " ".join(entry))
+    for name in omitted:
+        lines.append(f"# Omitted {name}: no passing worker with a passing different-family verifier.")
+    return "\n".join(lines) + "\n" + mapping_text({"providers": providers, "classes": classes, "verifiers": verifiers})
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--board", default="default")
     parser.add_argument("--routes")
     parser.add_argument("--probe", action="store_true")
+    parser.add_argument("--suggest-routes", metavar="FILE", help="Write probe-backed routes to a new path; requires --probe")
     parser.add_argument("--fix", action="store_true")
     parser.add_argument("--timeout", type=float, default=30, help="Timeout per subprocess, seconds")
     args = parser.parse_args(argv)
@@ -84,6 +126,12 @@ def main(argv=None):
         parser.error("Invalid board slug")
     if not 0 < args.timeout <= 300:
         parser.error("--timeout must be between 0 and 300 seconds")
+    suggestion = Path(args.suggest_routes).expanduser() if args.suggest_routes is not None else None
+    if suggestion is not None:
+        if not args.probe:
+            parser.error("--suggest-routes requires --probe")
+        if os.path.lexists(suggestion):
+            parser.error("--suggest-routes FILE already exists; choose a new path")
     counts = Counter()
 
     def report(state, label, detail):
@@ -123,7 +171,7 @@ def main(argv=None):
             report("PASS", "fix board", "existing board left unchanged")
         for label, path, content, mode in (
             ("routes", home / ".config/hermes-kanban-watch/routes.yaml", TEMPLATE.read_text(encoding="utf-8"), 0o600),
-            ("shim", home / ".local/bin/kanban-live",
+            ("shim", home / ".local/bin/hermes-kanban-live",
              "#!/bin/sh\nexec " + shlex.quote(sys.executable) + " " +
              shlex.quote(str(Path(__file__).resolve().with_name("kanban_live.py"))) + ' "$@"\n', 0o755),
         ):
@@ -178,17 +226,36 @@ def main(argv=None):
     except (OSError, UnicodeError, ValueError):
         report("FAIL", "routes", "cannot read or validate routes")
 
-    if shutil.which("kanban-live"):
-        report("PASS", "kanban-live", "resolvable on PATH")
-    elif args.fix and os.access(home / ".local/bin/kanban-live", os.X_OK):
-        report("UNKNOWN", "kanban-live", "shim installed, but add ~/.local/bin to PATH and rerun")
+    reader = shutil.which("hermes-kanban-live")
+    shim = home / ".local/bin/hermes-kanban-live"
+    candidate = reader or (str(shim) if args.fix and os.access(shim, os.X_OK) else None)
+    if candidate:
+        manifest = Path(__file__).resolve().parents[1] / ".claude-plugin/plugin.json"
+        identity = "hermes-kanban-watch " + json.loads(manifest.read_text(encoding="utf-8"))["version"]
+        try:
+            result = run([candidate, "--version"], args.timeout)
+            identified = result.returncode == 0 and result.stdout == identity + "\n"
+        except (OSError, subprocess.SubprocessError, UnicodeError):
+            identified = False
+        if not identified:
+            report("FAIL", "hermes-kanban-live",
+                   f"{candidate} did not identify as {identity!r} with --version; output omitted. "
+                   "Move the foreign or stale command out of PATH, then rerun --fix; "
+                   "existing files are never overwritten. Alternatively set args.live_cmd to this plugin's reader.")
+        elif reader:
+            report("PASS", "hermes-kanban-live", f"{candidate} identifies as {identity}")
+        else:
+            report("UNKNOWN", "hermes-kanban-live", "shim identified, but add ~/.local/bin to PATH and rerun")
     else:
-        report("FAIL", "kanban-live", "not found on PATH; use --fix or args.live_cmd")
+        report("FAIL", "hermes-kanban-live", "not found on PATH; use --fix or args.live_cmd")
 
     if args.probe and data:
-        entries = {tuple(entry[key] for key in ("profile", "model", "provider"))
+        entries = {lane(entry)
                    for section in ("classes", "verifiers") for entry in data[section].values()}
+        results = {}
         for profile, model, provider in sorted(entries):
+            entry = (profile, model, provider)
+            results[entry] = False
             label = f"probe {profile} {model} {provider}"
             if not hermes or profile not in profiles:
                 report("FAIL", label, "hermes or profile unavailable")
@@ -197,13 +264,22 @@ def main(argv=None):
                 result = run([hermes, "-p", profile, "chat", "-Q", "-q", PROMPT,
                               "-m", model, "--provider", provider], args.timeout)
                 passed = result.returncode == 0 and result.stdout.strip() == "PONG"
+                results[entry] = passed
                 report("PASS" if passed else "FAIL", label, "PONG" if passed else "not exactly PONG; output omitted")
             except (OSError, subprocess.SubprocessError, UnicodeError):
                 report("FAIL", label, "probe failed or timed out; output omitted")
+        if suggestion is not None:
+            try:
+                exclusive_file(suggestion, suggested_routes(data, results, routes_path(args.routes)))
+                report("PASS", "suggest routes", "created from this run's PONG results; source routes unchanged")
+            except FileExistsError:
+                report("FAIL", "suggest routes", "FILE already exists; left unchanged")
+            except (OSError, UnicodeError, ValueError):
+                report("FAIL", "suggest routes", "could not write FILE")
 
     print("Watcher permission allowlist (read-only commands):")
     for command in SUBCOMMANDS:
-        print(f"Bash(kanban-live {command}:*)")
+        print(f"Bash(hermes-kanban-live {command}:*)")
     print(f"Summary: {counts['PASS']} PASS, {counts['FAIL']} FAIL, {counts['UNKNOWN']} UNKNOWN")
     return 1 if counts["FAIL"] else 0
 

@@ -1,12 +1,13 @@
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-from conftest import PLUGIN
+from conftest import PLUGIN, ROOT
 from helpers import fake_hermes
 
 
@@ -56,10 +57,51 @@ def tree_bytes(root):
     return {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}
 
 
+@pytest.mark.parametrize("fix", [False, True])
+@pytest.mark.parametrize("response", ["foreign program", "", "hermes-kanban-watch 0.1.0",
+                                      "hermes-kanban-watch 0.2.0 extra"])
+def test_doctor_rejects_foreign_reader(setup_doctor, fix, response):
+    home, _, bindir, _, routefile = setup_doctor
+    # An unrelated legacy command must not satisfy the new reader check either.
+    legacy = bindir / "kanban-live"
+    legacy.write_text("#!/bin/sh\nexit 0\n")
+    legacy.chmod(0o755)
+    foreign = home / ".local/bin/hermes-kanban-live"
+    foreign.parent.mkdir(parents=True)
+    foreign.write_text(f"#!/bin/sh\nprintf '%s\\n' '{response}'\n")
+    foreign.chmod(0o755)
+    os.environ["PATH"] = str(foreign.parent) + os.pathsep + os.environ["PATH"]
+    before = foreign.read_bytes()
+    out = doctor(routefile, *( ["--fix"] if fix else []))
+    assert out.returncode == 1, out.stdout + out.stderr
+    assert "FAIL hermes-kanban-live:" in out.stdout
+    assert str(foreign) in out.stdout
+    assert "--version" in out.stdout and "args.live_cmd" in out.stdout
+    assert "move" in out.stdout.lower() and "--fix" in out.stdout
+    assert "PASS hermes-kanban-live:" not in out.stdout
+    assert foreign.read_bytes() == before
+
+
+def test_doctor_accepts_real_reader_shim(setup_doctor, monkeypatch):
+    home, _, _, _, routefile = setup_doctor
+    monkeypatch.setenv("PATH", str(home / ".local/bin") + os.pathsep + os.environ["PATH"])
+    out = doctor(routefile, "--fix")
+    assert out.returncode == 0, out.stdout + out.stderr
+    shim = home / ".local/bin/hermes-kanban-live"
+    version = subprocess.run([str(shim), "--version"], capture_output=True, text=True, timeout=10)
+    identity = "hermes-kanban-watch " + (ROOT / "VERSION").read_text().strip()
+    assert version.returncode == 0 and version.stdout == identity + "\n" and not version.stderr
+    assert f"PASS hermes-kanban-live: {shim}" in out.stdout
+    assert identity in out.stdout
+    out = doctor(routefile)
+    assert out.returncode == 0 and f"PASS hermes-kanban-live: {shim}" in out.stdout
+
+
 def test_doctor_read_only_and_canaries_never_opened(setup_doctor):
     home, _, bindir, _, routefile = setup_doctor
-    shim = bindir / "kanban-live"
-    shim.write_text("#!/bin/sh\nexit 0\n")
+    shim = bindir / "hermes-kanban-live"
+    shim.write_text("#!/bin/sh\nexec " + shlex.quote(sys.executable) + " " +
+                    shlex.quote(str(PLUGIN / "scripts/kanban_live.py")) + ' "$@"\n')
     shim.chmod(0o755)
     before = tree_bytes(home)
     out = doctor(routefile, audit=True)
@@ -71,7 +113,7 @@ def test_doctor_read_only_and_canaries_never_opened(setup_doctor):
     assert "do-not-report" not in out.stdout
     assert tree_bytes(home) == before
     for command in ("cards", "snapshot", "wait-start", "wait-any", "follow", "events", "active", "scout", "needs"):
-        assert f"Bash(kanban-live {command}:*)" in out.stdout
+        assert f"Bash(hermes-kanban-live {command}:*)" in out.stdout
 
 
 @pytest.mark.parametrize("board", ["default", "new-board"])
@@ -84,7 +126,7 @@ def test_doctor_fix_and_no_overwrite(setup_doctor, board):
                ["kanban", "boards", "create", board])
     out = doctor(routefile, "--fix", "--board", board)
     assert out.returncode == 0, out.stdout + out.stderr
-    shim = home / ".local/bin/kanban-live"
+    shim = home / ".local/bin/hermes-kanban-live"
     config = home / ".config/hermes-kanban-watch/routes.yaml"
     assert shim.stat().st_mode & 0o111
     assert "kanban_live.py" in shim.read_text()
@@ -122,7 +164,7 @@ def test_doctor_missing_board_live_and_profile(setup_doctor):
     routefile.write_text(json.dumps(routes))
     out = doctor(routefile, "--board", "absent")
     assert out.returncode == 1
-    assert "FAIL board" in out.stdout and "FAIL kanban-live" in out.stdout and "FAIL class app-code" in out.stdout
+    assert "FAIL board" in out.stdout and "FAIL hermes-kanban-live" in out.stdout and "FAIL class app-code" in out.stdout
 
 
 @pytest.mark.parametrize("response,passes", [("PONG", True), ("PONG extra", False), ("", False)])
@@ -152,17 +194,21 @@ def test_doctor_suppresses_key_like_values(setup_doctor):
 
 def test_doctor_no_bytecode_writes_without_environment_opt_out(setup_doctor, tmp_path, monkeypatch):
     import shutil
-    _, _, _, _, routefile = setup_doctor
+    home, _, _, _, routefile = setup_doctor
     install = tmp_path / "install"
     scripts = install / "scripts"
-    scripts.mkdir(parents=True)
-    for name in ("doctor.py", "route.py"):
-        shutil.copyfile(PLUGIN / "scripts" / name, scripts / name)
+    shutil.copytree(PLUGIN, install, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    monkeypatch.setenv("PATH", str(home / ".local/bin") + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
+    fixed = subprocess.run([sys.executable, str(scripts / "doctor.py"), "--routes", str(routefile), "--fix"],
+                           capture_output=True, text=True, timeout=10)
+    assert fixed.returncode == 0, fixed.stdout + fixed.stderr
     monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
     before = tree_bytes(install)
     out = subprocess.run([sys.executable, str(scripts / "doctor.py"), "--routes", str(routefile)],
                          capture_output=True, text=True, timeout=10)
     assert "PASS profile builder" in out.stdout
+    assert "PASS hermes-kanban-live:" in out.stdout
     assert tree_bytes(install) == before
 
 

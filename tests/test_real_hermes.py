@@ -68,13 +68,31 @@ def test_real_hermes_documented_commands_reader_and_doctor(isolated_home, tmp_pa
         (profile / "config.yaml").write_text("model:\n  provider: openai\n  default: gpt-5\n")
     routefile = tmp_path / "routes.json"
     routefile.write_text(json.dumps(routes))
+    body = tmp_path / "brief.txt"
+    body.write_text("Implement a feature.\nKeep the read-back exact.\n")
+    worktree = tmp_path / "future-worktree"
+    filed = run(sys.executable, str(PLUGIN / "scripts/file_card.py"), "--board", "demo",
+                "--class", "app-code", "--title", "Routed real card", "--body-file", str(body),
+                "--routes", str(routefile), "--worktree", str(worktree))
+    watch = json.loads(next(line.removeprefix("/kanban-watch ") for line in filed.splitlines()
+                            if line.startswith("/kanban-watch ")))
+    assert watch["board"] == "demo" and len(watch["tasks"]) == 1
+    task_id = watch["tasks"][0]
+    shown = json.loads(run(REAL_HERMES, "kanban", "--board", "demo", "show", task_id, "--json"))
+    task = shown["task"]
+    assert task["id"] == task_id and task["title"] == "Routed real card"
+    assert task["assignee"] == "builder" and task["body"] == body.read_text()
+    assert task["model_override"] == "gpt-5" and task["provider_override"] == "openai"
+    assert task["workspace_kind"] == "worktree" and task["workspace_path"] == str(worktree)
+    all_cards = json.loads(run(sys.executable, reader, "cards", "--board", "demo"))
+    assert all_cards["count"] == 2 and task_id in [card["id"] for card in all_cards["cards"]]
     fixed_db = hermes / "kanban/boards/doctor-check/kanban.db"
     assert not fixed_db.exists()
     doctor = str(PLUGIN / "scripts/doctor.py")
     fixed = run(sys.executable, doctor, "--routes", str(routefile), "--board", "doctor-check", "--fix")
     assert "PASS fix board:" in fixed and "PASS board:" in fixed
     assert "0 FAIL" in fixed and fixed_db.is_file()
-    shim = home / ".local/bin/kanban-live"
+    shim = home / ".local/bin/hermes-kanban-live"
     assert shim.is_file() and os.access(shim, os.X_OK)
     assert (home / ".config/hermes-kanban-watch/routes.yaml").is_file()
     empty = json.loads(run(sys.executable, reader, "cards", "--board", "doctor-check"))

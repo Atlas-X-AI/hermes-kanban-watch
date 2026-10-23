@@ -31,7 +31,7 @@ def test_project_version_and_ci():
     version = (ROOT / "VERSION").read_text().strip()
     manifest = json.loads((PLUGIN / ".claude-plugin/plugin.json").read_text())
     assert project["project"]["name"] == manifest["name"]
-    assert project["project"]["version"] == manifest["version"] == version == "0.1.0"
+    assert project["project"]["version"] == manifest["version"] == version == "0.2.0"
     assert project["project"]["requires-python"] == ">=3.11"
     assert any(dep.split(">=")[0] == "pytest" for dep in project["dependency-groups"]["dev"])
     ci = (ROOT / ".github/workflows/ci.yml").read_text()
@@ -60,7 +60,7 @@ def test_banner_and_public_documents():
     doctor = (PLUGIN / "scripts/doctor.py").read_text()
     commands = ("cards", "snapshot", "wait-start", "wait-any", "follow", "events", "active", "scout", "needs")
     for command in commands:
-        assert f"Bash(kanban-live {command}:*)" in readme
+        assert f"Bash(hermes-kanban-live {command}:*)" in readme
         assert f'"{command}"' in doctor
 
 
