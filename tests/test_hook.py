@@ -21,6 +21,7 @@ def test_hook_created_ids_and_board(command, output, board, ids):
     assert out.returncode == 0, out.stderr
     note = json.loads(out.stdout)["hookSpecificOutput"]["additionalContext"]
     assert "/kanban-watch" in note and f'"{board}"' in note
+    assert "hermes-kanban-watch:kanban-watcher" in note and "hermes-kanban-live" in note
     assert all(card in note for card in ids)
     assert "scriptPath" not in note and ".py" not in note and ".js" not in note
 

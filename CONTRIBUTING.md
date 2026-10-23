@@ -45,7 +45,10 @@ three fresh GitHub-hosted machines using Python 3.11, 3.12 and 3.13.
   expand permissions after a denial, or add implicit dispatch/setup writes.
 - Use synthetic, sanitised fixtures. Tests must not touch real user homes.
 - Keep public examples portable; no local machine paths or internal project names.
-- Keep `VERSION`, `pyproject.toml` and the plugin manifest version in sync.
+- Keep `VERSION`, `pyproject.toml`, the plugin manifest and marketplace entry versions in sync.
+  The installed `hermes-kanban-live --version` identity must agree with them.
+- Keep every workflow row on `hermes-kanban-watch:kanban-watcher` or the validated
+  `agent_type` override. No test may rely on a private user agent or legacy reader.
 
 Changing routes must preserve different-model-family review. Keep documentation
 honest about UNKNOWN compatibility rather than extending support by assumption.

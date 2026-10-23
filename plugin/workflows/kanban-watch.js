@@ -6,6 +6,10 @@ export const meta = {
 }
 
 const A = args || {}
+const AGENT_TYPE = A.agent_type === undefined ? 'hermes-kanban-watch:kanban-watcher' : A.agent_type
+if (typeof AGENT_TYPE !== 'string' || !/^[A-Za-z0-9_-]+(?::[A-Za-z0-9_-]+)?$/.test(AGENT_TYPE) || AGENT_TYPE.trim() !== AGENT_TYPE) {
+  throw new Error('agent_type must contain letters, digits, -, _ and at most one colon between non-empty names')
+}
 const BOARD = A.board === undefined ? 'default' : A.board
 if (typeof BOARD !== 'string' || !/^[A-Za-z0-9_-]+$/.test(BOARD) || BOARD.trim() !== BOARD) {
   throw new Error(`Invalid board slug: ${JSON.stringify(BOARD)}; expected ^[A-Za-z0-9_-]+$`)
@@ -26,7 +30,7 @@ if (typeof STALE_DAYS !== 'number' || !Number.isFinite(STALE_DAYS) || STALE_DAYS
   throw new Error('stale_days must be a finite non-negative number (0 disables)')
 }
 // args.live_cmd may name an interpreter plus a script, but never shell syntax.
-const LIVE = args && args.live_cmd !== undefined ? args.live_cmd : 'kanban-live'
+const LIVE = args && args.live_cmd !== undefined ? args.live_cmd : 'hermes-kanban-live'
 if (typeof LIVE !== 'string' || !/^[A-Za-z0-9/._~ -]+$/.test(LIVE) || !LIVE.trim()) {
   throw new Error('live_cmd must be a non-empty command containing only letters, numbers, spaces, /, ., _, -, ~')
 }
@@ -164,7 +168,7 @@ const readCounted = async (prompt, options, fields, retryPrompt = prompt) => {
   let prev = null
   for (let attempt = 0; attempt < 2; attempt++) {
     const reply = await observe(attempt ? retryPrompt : prompt, {
-      ...options, agentType: 'kanban-watcher', model: 'haiku', effort: 'low',
+      ...options, agentType: AGENT_TYPE, model: 'haiku', effort: 'low',
     })
     if (!reply) {
       if (attempt) {
@@ -263,7 +267,7 @@ const watchCard = async (c, version) => {
     ` summary = run.summary verbatim; retried = snapshot.retried; warnings = snapshot.warnings verbatim ({} when empty).` +
     ` If two follow calls in a row each printed "no new worker messages" while running, say "possibly wedged" in odd.`,
     {
-      agentType: 'kanban-watcher', model: 'sonnet', effort: 'low',
+      agentType: AGENT_TYPE, model: 'sonnet', effort: 'low',
       label: `${short(c.title)} · ${c.id}${model ? ` · ${model}` : ''}${c.runs > 1 ? ` · run ${c.runs}` : ''}`,
       phase: phaseTitle, schema: REPORT,
     },
@@ -327,7 +331,7 @@ const watchCard = async (c, version) => {
     `${READ_ONLY}\n\nKanban card ${c.id} on board ${BOARD} stopped as ${report.verdict}. Run \`${LIVE} snapshot --board ${shellQuote(BOARD)} --task ${shellQuote(c.id)}\`` +
     ` and return block_reason verbatim when present. For REVIEW use run.summary to say what is waiting for a reviewer. For STILL_RUNNING say it is still running and when it last spoke. For NOT_STARTING say how long it has been ready and that no dispatcher took it. If the reason is null, say no block reason was recorded; do not invent one.`,
     {
-      agentType: 'kanban-watcher', model: 'haiku', effort: 'low',
+      agentType: AGENT_TYPE, model: 'haiku', effort: 'low',
       label: `⚠ ${report.verdict.replace(/_/g, ' ')} · ${short(c.title)} · ${c.id}`, phase: NEEDS_YOU, schema: FLAG,
     },
   )
@@ -343,7 +347,7 @@ const named = requested.filter(validCardId)
 if (requested.length && !named.length) return { board: BOARD, cards: [] }
 const first = await readCounted(
   `${READ_ONLY}\n\nRun \`${LIVE} cards --board ${shellQuote(BOARD)}${named.map(t => ` --task ${shellQuote(t)}`).join('')} --stale-days ${shellQuote(STALE_DAYS)}\`; run it once and return its JSON as is (now, cards, count, missing, stale_skipped, stale_days).`,
-  { agentType: 'kanban-watcher', model: 'haiku', effort: 'low', label: `read board ${BOARD}`, phase: BOARD_PHASE, schema: CARDS },
+  { agentType: AGENT_TYPE, model: 'haiku', effort: 'low', label: `read board ${BOARD}`, phase: BOARD_PHASE, schema: CARDS },
   [['cards', 'count']],
 )
 if (!first) return { board: BOARD, read_status: 'UNKNOWN', error: readErrors.join('; ') || 'could not read the board' }
@@ -442,7 +446,7 @@ const waitPhase = async (title, ids) => {
       `${needsYou ? '' : ` --ready-stale ${shellQuote(READY_STALE)}`}\`. Retry only exit 3, up to 169 times.` +
       ` Stop on any other exit: 0 (a card started), 4 (a card is missing), 5, 6 (NOT_STARTING) or 1/2. Return the last JSON started, cards, missing and not_starting exactly, plus exit.`,
       {
-        agentType: 'kanban-watcher', model: 'haiku', effort: 'low',
+        agentType: AGENT_TYPE, model: 'haiku', effort: 'low',
         label: needsYou ? `⚠ NOT STARTING · ${title} · ${notStarting.join(', ')}` : `⏳ waiting · ${title} · ${pending.length} card(s)`,
         phase: needsYou ? NEEDS_YOU : title, schema: WAITED,
       },
@@ -534,7 +538,7 @@ log(`${Object.keys(cards).length} card(s): ${Object.keys(cards).length - waiting
       ` Exit 3 means nothing new yet: run the same command again, up to ${retries} times. Stop on exit 0 (a watched card filed a new card, resumed, or stopped as blocked/review),` +
       ` exit 2 (every watched card is done or archived: all_finished true) or 5. Return the last call's JSON: copy changed, new, count_changed and count_new exactly as printed.`,
       {
-        agentType: 'kanban-watcher', model: 'haiku', effort: 'low',
+        agentType: AGENT_TYPE, model: 'haiku', effort: 'low',
         label: parked ? 'parked on blocked/review cards; waiting for resumes' : A.follow_new === false ? 'watching for blocks and resumes' : 'watching for cards the workers file',
         phase: BOARD_PHASE, schema: EVENTS,
       },

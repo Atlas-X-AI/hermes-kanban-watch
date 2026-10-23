@@ -62,7 +62,7 @@ python3 "<plugin dir>/scripts/doctor.py"
 The first command only checks setup. `--fix` opts into three local setup actions:
 initialise a missing default board with `hermes kanban --board default init`
 or a missing named board with `hermes kanban boards create <slug>`, copy the routes template to
-`~/.config/hermes-kanban-watch/routes.yaml`, and create a `~/.local/bin/kanban-live`
+`~/.config/hermes-kanban-watch/routes.yaml`, and create a `~/.local/bin/hermes-kanban-live`
 shim. It never overwrites existing files, including symlinks, creates profiles,
 or changes credentials. Edit the copied routes to name your existing profiles.
 Keep the plugin installed: the shim points to that location. After moving or
@@ -71,7 +71,12 @@ reinstalling the plugin, inspect and update that shim yourself; `--fix` leaves i
 Doctor reports PASS / FAIL / UNKNOWN. Exit 0 means no FAILs, not that UNKNOWNs
 were verified. It checks Hermes's version, board-file existence (not schema
 compatibility), `model.provider` and `model.default` in profile configs, routed
-profile existence and the reader on PATH. Unsupported config shapes are UNKNOWN.
+profile existence and the reader on PATH. The reader's `--version` must print
+exactly `hermes-kanban-watch 0.2.0`. A foreign or stale `hermes-kanban-live` is FAIL,
+with its resolved path shown, even with `--fix`. Move that command aside or fix
+PATH before rerunning `--fix`, or use `args.live_cmd` for this plugin's reader.
+The doctor never overwrites a conflicting command. Existing unrelated
+`kanban-live` commands are not used or changed. Unsupported config shapes are UNKNOWN.
 It never opens `.env`, `auth.json`, session stores or other credential files.
 
 ### Read-only permissions
@@ -80,15 +85,15 @@ Doctor prints these exact permission entries. Add them using Claude Code's
 permission UI/settings if needed, not a blanket approval for Bash:
 
 ```text
-Bash(kanban-live cards:*)
-Bash(kanban-live snapshot:*)
-Bash(kanban-live wait-start:*)
-Bash(kanban-live wait-any:*)
-Bash(kanban-live follow:*)
-Bash(kanban-live events:*)
-Bash(kanban-live active:*)
-Bash(kanban-live scout:*)
-Bash(kanban-live needs:*)
+Bash(hermes-kanban-live cards:*)
+Bash(hermes-kanban-live snapshot:*)
+Bash(hermes-kanban-live wait-start:*)
+Bash(hermes-kanban-live wait-any:*)
+Bash(hermes-kanban-live follow:*)
+Bash(hermes-kanban-live events:*)
+Bash(hermes-kanban-live active:*)
+Bash(hermes-kanban-live scout:*)
+Bash(hermes-kanban-live needs:*)
 ```
 
 A `live_cmd` override needs matching permissions. The watcher never retries a
@@ -106,7 +111,7 @@ claude --plugin-dir /path/to/hermes-kanban-watch/plugin
 Hermes Kanban board + worker sessions
                   |
                   v
-         kanban-live reader
+      hermes-kanban-live reader
                   |
                   v
    Claude Code workflow rows
@@ -210,10 +215,15 @@ A bare `{"board":"demo"}` watches queued/running cards. Explicit ids always stay
 | `max_hours` | `12` | Board-event watch budget, with 270-second reader wakes. |
 | `verbose` | `false` | Show legacy worker text/tool results rather than compact output. |
 | `ready_stale` | `900` | Seconds ready before flagging NOT_STARTING. |
-| `live_cmd` | `kanban-live` | Reader override, such as `python3 ~/plugins/hermes-kanban-watch/plugin/scripts/kanban_live.py`. |
+| `live_cmd` | `hermes-kanban-live` | Reader override, such as `python3 ~/plugins/hermes-kanban-watch/plugin/scripts/kanban_live.py`. |
+| `agent_type` | `hermes-kanban-watch:kanban-watcher` | Agent for every workflow row, including board, waiting, live and Needs you rows. |
 
 `live_cmd` allows only letters, digits, spaces, `/`, `.`, `_`, `-`, `~`. No quoting,
 shell operators, substitutions or newlines. Use a PATH shim for paths with spaces.
+`agent_type` allows only ASCII letters, digits, `-`, `_`, and one optional `:`
+between non-empty names. The default is the agent shipped by this plugin, so no
+private user agent named `kanban-watcher` is needed. An override must name an
+agent available in your Claude Code installation.
 Blocked/review cards stay watched for resumes and re-arm at most five times.
 A normal exit-3 timeout means keep waiting. A valid read needs `read_status: OK`
 and a positive `now`. DONE is a recorded card result, not acceptance: inspect the
@@ -221,7 +231,7 @@ actual model, fallback, warnings, summary and deliverable independently.
 
 ### Human-ask convention
 
-For `kanban-live needs`, start a comment line with `ASK OPERATOR:` and the question.
+For `hermes-kanban-live needs`, start a comment line with `ASK OPERATOR:` and the question.
 Wait/block reasons match `waiting on operator`, `waiting for operator` or
 `needs operator`. A prose mention such as "no ASK OPERATOR yet" does not match.
 These are explicit text conventions, not natural-language intent detection.
@@ -237,6 +247,7 @@ into a workflow row.
 | UNKNOWN | A read failed, permissions were denied or the response shape was invalid. It does not mean the card disappeared. |
 | No live UI | Your Claude Code must provide dynamic Workflow support; terminal commands do not prove the UI works. |
 | Reader missing | Rerun doctor, check `~/.local/bin` on PATH and the shim's install location. |
+| Foreign or stale reader | Doctor names the failing `hermes-kanban-live` path. Move it aside or correct PATH; `--fix` never overwrites it. |
 | Missing route profile | Replace example profile names with your own existing profiles. |
 
 ## Supported target

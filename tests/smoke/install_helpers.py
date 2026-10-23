@@ -93,13 +93,16 @@ def main():
     before = tree_hashes(home), tree_hashes(hermes)
     readonly = run([sys.executable, doctor, "--routes", routes], expected=1, doctor=True)
     assert "PASS hermes:" in readonly and "PASS profile builder:" in readonly
-    assert "FAIL board:" in readonly and "FAIL kanban-live:" in readonly
+    assert "FAIL board:" in readonly and "FAIL hermes-kanban-live:" in readonly
     assert before == (tree_hashes(home), tree_hashes(hermes)), "read-only doctor wrote user data"
     print("Read-only doctor: expected missing board/shim; no writes or canary output", flush=True)
     fixed = run([sys.executable, doctor, "--routes", routes, "--fix"], doctor=True)
     assert "PASS fix board:" in fixed and "PASS fix shim:" in fixed
-    shim = home / ".local/bin/kanban-live"
+    shim = home / ".local/bin/hermes-kanban-live"
     assert shim.is_file() and os.access(shim, os.X_OK)
+    identity = "hermes-kanban-watch " + json.loads((installed / ".claude-plugin/plugin.json").read_text())["version"]
+    assert run([shim, "--version"]) == identity + "\n"
+    assert "PASS hermes-kanban-live:" in fixed and identity in fixed
     # The fake init intentionally creates a placeholder, just as in pytest.
     # Replace only that file with a real one-card board using the shared schema.
     db = hermes / "kanban.db"
@@ -115,7 +118,7 @@ def main():
     assert cards["read_status"] == "OK" and cards["count"] == 1
     assert [card["id"] for card in cards["cards"]] == [CARD_ID]
     assert db.read_bytes() == before, "cards mutated the board"
-    print("Installed kanban-live: read_status OK; one card t_install_smoke; board unchanged", flush=True)
+    print("Installed hermes-kanban-live: read_status OK; one card t_install_smoke; board unchanged", flush=True)
 
 
 if __name__ == "__main__":
