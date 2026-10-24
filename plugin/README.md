@@ -1,4 +1,4 @@
-# hermes-kanban-watch 0.2.0
+# hermes-kanban-watch 0.3.0
 
 For marketplace installation, setup and the complete guide, see the
 [repository README](https://github.com/Atlas-X-AI/hermes-kanban-watch#readme).
@@ -66,7 +66,7 @@ Doctor prints PASS / FAIL / UNKNOWN for each check and a summary. Exit 0 means n
 FAILs, not that UNKNOWNs were verified. Without flags, it only checks Hermes's
 version, the board file, the two model keys in each profile config, route profile
 existence and `hermes-kanban-live` on PATH. Its `--version` must print exactly
-`hermes-kanban-watch 0.2.0`. A foreign or stale command is FAIL with its resolved
+`hermes-kanban-watch 0.3.0`. A foreign or stale command is FAIL with its resolved
 path shown; move it aside or correct PATH, then rerun `--fix`, or set `args.live_cmd`
 to this plugin's reader. Existing unrelated `kanban-live` commands are not used
 or changed. It never opens `.env`, `auth.json`, sessions
@@ -177,6 +177,7 @@ Only after that succeeds does it print the card id and the exact command to past
 ```text
 Card: t_1234abcd
 /kanban-watch {"board":"demo","tasks":["t_1234abcd"]}
+Not dispatched. Run: hermes kanban --board demo dispatch
 ```
 
 Add `--dry-run` to print shell-quoted create, set-model and show commands without
@@ -226,6 +227,17 @@ exit-3 timeout means keep waiting, not missing or complete. Reads must include
 A PONG probe, card DONE, or green watcher result is not proof of integration or
 user acceptance. Read the actual model, fallback, warnings, recorded summary and
 deliverable, and independently verify what the worker built.
+
+When worker messages are unavailable, follow reports
+`worker messages unavailable; using card log` once per run and watcher. Progress
+is card-log growth only: a growing or changed log produces `progress advanced`
+and prevents a possibly-wedged warning. A heartbeat is never progress, because a
+wedged worker keeps heartbeating. Only two consecutive same-run running calls with
+`progress flat` can be flagged. When worker messages are available, the rule is
+unchanged: two consecutive running calls that each print `no new worker messages`
+are flagged. First observations, run changes and unreadable
+signals do not count as stalled calls. Named and default board log paths are
+supported. The 270-second wake is unchanged.
 
 ### Read-only permissions
 
@@ -279,6 +291,19 @@ and providers may include `.`, `_`, `/`, `@`, `:`, `+` or `-`. Doctor reads only
 block-mapping `model.provider` and `model.default` from profile config; other
 configuration shapes are UNKNOWN and never repaired automatically.
 
+## Features
+
+<!-- A new feature adds one file and one bullet, appended at the end of this list. -->
+- [Wave time and actual-run report](docs/wave-report.md): Inspect actual runs, elapsed seconds, retries and fallbacks.
+- [Verify the families that actually ran](docs/verify-pair.md): Compare the worker and verifier's actual finished-run families.
+- [Arm needs once with its own timeout loop](docs/needs-loop.md): Keep a read-only parent-question watch armed across timeouts.
+- [Print a head-pinned PR merge receipt](docs/pr-merge-receipt.md): Check verifier evidence and CI against the live PR head without merging.
+- [Watcher token cost](docs/watcher-token-cost.md): Inspect Claude Code watcher token usage separately from worker elapsed time.
+- [Duplicate workers and questions parked on the parent](docs/duplicate-workers-parent-questions.md): Observe duplicate processes and current parent waits without modifying them.
+- [File a fix and re-verify an earlier verdict](docs/fix-and-reverify.md): Explicitly file a fix or different-family re-verification from a finished verdict.
+- [Workflow-owned wait rounds](docs/workflow-wait-rounds.md): Continue healthy read-only waits across bounded rounds and a shared deadline.
+- [Suggest standing answers without posting](docs/standing-answers.md): Validate answer rules and print proposals for authorised review, never post them.
+
 ## Development checks
 
 ```sh
@@ -294,82 +319,3 @@ The opt-in real-Hermes check uses the real CLI in disposable homes; it is skippe
 unless `HERMES_KANBAN_WATCH_REAL=1` and Hermes is on PATH.
 The module parse check retains the metadata export and wraps the complete
 Workflow async body, not a stripped stub. No live profiles or models are tested.
-
-### Wave time and actual-run report
-
-Use the installed reader, or replace `hermes-kanban-live` with
-`python3 <plugin-root>/scripts/kanban_live.py`:
-
-```sh
-hermes-kanban-live report --board demo
-hermes-kanban-live report --board demo --task t_1234abcd --task t_11111111
-hermes-kanban-live report --board demo --since 1792700000 --format text
-```
-
-JSON is one envelope with `read_status`, `now`, `cards`, `totals` and `missing`.
-Each card object has `id`, `title`, `status`, `assignee`, `model_used`,
-`provider_used`, `fallback_from`, `runs`, `retried`, `duration_s` and `warnings`.
-Model/provider/fallback, duration and warning counts describe the newest run by
-run id, never the card's pin. No run means null model/timing, zero runs and empty
-warnings. `retried` uses the reader's conservative retry guard: multiple runs or
-a blocked/unblocked/gave-up/timed-out/crashed/changes-requested event.
-
-Without `--task`, all cards are included, even finished or archived ones.
-Repeated `--task` ids select a set. `--since` selects cards created at or after
-that epoch; combined filters intersect. Runs are not time-clipped: `totals`
-contains `by_status`, `run_seconds` across every run of the selected cards,
-`fell_back` (cards with a fallback on any run), and `retried` (cards, not attempts).
-Running durations use the report's `now`; missing timing stays null and is
-excluded from the seconds total. Durations are elapsed seconds, not token counts
-or a currency estimate. `--format text` prints aligned columns and a totals line,
-without Markdown. Exit 4 means an explicit id is absent from the board (not merely
-filtered out by `--since`); exit 5 means the board could not be read.
-
-### Verify the families that actually ran
-
-```sh
-hermes-kanban-live verify-pair --board demo --worker t_1234abcd --verifier t_11111111
-hermes-kanban-live verify-pair --board demo --worker t_1234abcd --verifier t_11111111 --families /path/to/routes.yaml
-```
-
-The JSON result names each card's latest **finished** run (`ended_at` is set),
-its `run_id`, `model_used`, `provider_used` and configured `family`, plus
-`different_families`. A newer unfinished run is not a finished review. No profile
-config or model pin is read. The actual run's `provider_used` is looked up in the
-routes file's `providers` mapping; this is a configured model-family assertion,
-not a guess from an API hostname or model-name prefix. Map hosts serving the same
-family alike, and use family-specific identifiers for multi-family hosts.
-
-File precedence is `--families`, `KANBAN_WATCH_ROUTES`, the user routes file, then
-the shipped template, exactly as for `route.py`. YAML/JSON parsing is shared with
-the router; only a non-empty, valid `providers` mapping is required here.
-Exit 0 means different known families, 1 means the same family **or classification
-failed**, 3 means either card has no finished run (including an absent id), and 5
-means unreadable board. On classification failure `different_families` is null
-and `error` explains the failure; never treat that as independence. A family
-comparison does not prove the verifier actually inspected the deliverable.
-
-### Arm needs once with its own timeout loop
-
-```sh
-hermes-kanban-live needs --board demo --loop --created-by my-parent-session --cursor-key my-wave
-hermes-kanban-live needs --board demo --loop --since 1792700000 --created-by my-parent-session
-```
-
-`--loop` consumes normal exit-3 timeout windows internally, sleeping at
-`--interval` (default 15 seconds) and keeping the original `--since` throughout.
-If omitted, `--since` is captured once when the command starts. The first poll
-also considers older blocked/dependency-wait/park events whose wait is still in
-force, so an already-waiting card from `--created-by` can immediately produce a
-`parent_question`. Answered, resumed or superseded old waits are not replayed.
-Existing seen-cursor deduplication still applies; use a distinct `--cursor-key`
-for an independent caller.
-
-The command exits 0 with the first non-empty `{now, items}` result. It does not
-retry unreadable boards, permission failures or any other error, and it does not
-dispatch, answer or modify a card. `--max-seconds` is a retry-window size, not an
-overall lifetime limit in loop mode; stop the caller to cancel an uneventful
-watch. Without `--loop`, `--since` remains required and timeout/output behaviour
-is unchanged. Direct Claude Code use of the new report/pair commands needs narrow
-`Bash(hermes-kanban-live report:*)` and `Bash(hermes-kanban-live verify-pair:*)`
-permissions; the existing needs permission covers `--loop`.

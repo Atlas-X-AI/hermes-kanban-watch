@@ -139,6 +139,63 @@ def connect(path: Path) -> sqlite3.Connection:
     return conn
 
 
+def worker_processes() -> dict[str, list[int]] | None:
+    """One read-only proc scan. None means incomplete observation, not no workers.
+
+    Match a whole query argument or consecutive argv tokens, never a task-id prefix
+    or prose mentioning the query. A process disappearing mid-scan is normal; any
+    other read error makes the scan UNKNOWN. No process is signalled or inspected
+    beyond its cmdline.
+    """
+    query = re.compile(rb"(?:^|\x00)work[ \x00]kanban[ \x00]task[ \x00]([A-Za-z0-9_-]+)(?=\x00|$)")
+    workers: dict[str, list[int]] = {}
+    try:
+        for entry in Path(os.environ.get("KANBAN_LIVE_PROC_ROOT", "/proc")).iterdir():
+            if not entry.name.isdecimal():
+                continue
+            try:
+                cmdline = (entry / "cmdline").read_bytes()
+            except (FileNotFoundError, ProcessLookupError):
+                continue  # exited since the directory was enumerated
+            for task in {match.decode("ascii") for match in query.findall(cmdline)}:
+                workers.setdefault(task, []).append(int(entry.name))
+    except OSError:
+        return None
+    return {task: sorted(pids) for task, pids in workers.items()}
+
+
+def duplicate_worker_warnings(task: str, workers: dict[str, list[int]] | None) -> dict:
+    if workers is None:
+        return {"duplicate_workers": "UNKNOWN"}
+    pids = workers.get(task, [])
+    return {"duplicate_workers": pids} if len(pids) > 1 else {}
+
+
+def parent_wait(conn: sqlite3.Connection, task: str, status: str) -> dict | None:
+    """Current dependency question, with the full last-run summary, not its preview."""
+    if status not in {"todo", "ready"}:
+        return None
+    event = conn.execute(
+        "select * from task_events where task_id = ? order by id desc limit 1",
+        (task,),
+    ).fetchone()
+    if event is None or event["kind"] != "dependency_wait":
+        return None
+    run_id = event["run_id"] if "run_id" in event.keys() else None
+    if conn.execute(
+            "select 1 from task_runs where task_id = ? and (started_at > ? or (? is not null and id > ?)) limit 1",
+            (task, event["created_at"], run_id, run_id)).fetchone():
+        return None
+    run = conn.execute(
+        "select status, summary from task_runs where task_id = ? order by id desc limit 1", (task,),
+    ).fetchone()
+    # Also reject a running run on older boards without event run ids, including
+    # one claimed in the same second as the wait.
+    if run and run["status"] == "running":
+        return None
+    return {"at": event["created_at"], "text": run["summary"] if run else None}
+
+
 def read_card(board: str, task: str) -> dict | None:
     with connect(board_db(board)) as conn:
         # The run pointer and its warning counts must describe the same snapshot.
@@ -166,6 +223,9 @@ def read_card(board: str, task: str) -> dict | None:
         ).fetchone()
         card["last_event"] = dict(event) if event else None
         card["block_reason"] = clip_reason(block_reason(conn, task)) if card["status"] == "blocked" else None
+        waiting = parent_wait(conn, task, card["status"])
+        if waiting:
+            card.update(waiting_on="parent", waiting_text=waiting["text"])
     return card
 
 
@@ -320,6 +380,8 @@ class FollowOutput:
         self.latest = None
         self.calls: list[str] = []
         self.quiet = False
+        self.progress: str | None = None
+        self.unavailable = False
 
     @staticmethod
     def size(line: str) -> int:
@@ -402,10 +464,17 @@ class FollowOutput:
         # Put its short line in the reserved status budget even with a tiny cap.
         if self.quiet:
             status = "no new worker messages\n" + status
+        if self.unavailable:
+            status = "worker messages unavailable; using card log\n" + status
+        if self.progress:
+            status = f"progress {self.progress}\n" + status
         if self.max_bytes is None:
             print(status, flush=True)
             return
         footer = f"… {self.hidden} lines not shown (the cursor has moved past them)" if self.hidden else ""
+        # Tiny caps must retain the progress, availability and final status signals.
+        if footer and self.used + self.size(status) + self.size(footer) > self.max_bytes:
+            footer = f"… {self.hidden} lines not shown"
         available = self.max_bytes - self.used - len((footer + "\n").encode("utf-8")) - 1
         raw = status.encode("utf-8")
         if len(raw) > available:
@@ -429,8 +498,68 @@ def new_messages(store: Path, session: str, after: int) -> list[sqlite3.Row]:
         ).fetchall()
 
 
+def has_worker_messages(store: Path, session: str) -> bool:
+    with connect(store) as conn:
+        return conn.execute(
+            "select 1 from messages where session_id = ? and active = 1"
+            " and role in ('assistant', 'tool') limit 1", (session,),
+        ).fetchone() is not None
+
+
+def follow_progress(board: str, card: dict) -> dict:
+    """The card's own run and log, never the watcher's log or a profile-wide signal."""
+    run = card.get("run") or {}
+    heartbeat = card.get("last_heartbeat_at")
+    if heartbeat is not None and heartbeat < (run.get("started_at") or 0):
+        heartbeat = None  # a previous run's heartbeat is not this run's progress
+    directory = HERMES / "kanban"
+    if board not in ("", "default"):
+        directory = directory / "boards" / board
+    try:
+        stat = (directory / "logs" / f"{card['id']}.log").stat()
+        size, mtime = stat.st_size, stat.st_mtime_ns
+    except OSError:
+        size, mtime = None, None  # unreadable/missing is UNKNOWN, not a flat log
+    return {"run_id": run.get("id"), "heartbeat": heartbeat,
+            "log_size": size, "log_mtime_ns": mtime}
+
+
+def read_follow_progress(path: Path) -> dict:
+    try:
+        state = json.loads(path.read_text())
+        fields = ("run_id", "heartbeat", "log_size", "log_mtime_ns")
+        if isinstance(state, dict) and all(
+                key in state and (state[key] is None or type(state[key]) is int) for key in fields):
+            return state
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+def progress_change(previous: dict, current: dict) -> str:
+    """A baseline or incomplete observation can never supply evidence of a stall.
+
+    Progress is card-log growth only. A heartbeat is recorded but never counts:
+    Hermes heartbeats on stream waits, retries and API-error recovery, so a
+    wedged worker keeps heartbeating.
+    """
+    if current["run_id"] is None:
+        return "unknown"
+    if not previous or previous["run_id"] != current["run_id"]:
+        return "baseline"
+    if any(previous.get(key) is not None and current[key] is not None and
+           (current[key] != previous[key] if key == "log_mtime_ns" else current[key] > previous[key])
+           for key in ("log_size", "log_mtime_ns")):
+        return "advanced"
+    if any(previous.get(key) is None or current[key] is None
+           for key in ("log_size", "log_mtime_ns")):
+        return "unknown"
+    return "flat"
+
+
 def cmd_snapshot(args) -> int:
     code = 0
+    workers = worker_processes()
     for task in args.task:
         card = read_card(args.board, task)
         if card is None:
@@ -438,6 +567,7 @@ def cmd_snapshot(args) -> int:
                               "status": "NOT_FOUND", "retried": False, "warnings": {}}))
             code = 4
         else:
+            card["warnings"].update(duplicate_worker_warnings(task, workers))
             with connect(board_db(args.board)) as conn:
                 card["retried"] = was_retried(conn, task)
             print(json.dumps({**card, "read_status": "OK", "now": int(time.time())},
@@ -501,6 +631,11 @@ def board_cards(board: str, tasks: list[str] | None) -> list[dict]:
 
 def cmd_cards(args) -> int:
     cards = board_cards(args.board, args.task)
+    workers = worker_processes()
+    for card in cards:
+        warnings = duplicate_worker_warnings(card["id"], workers)
+        if warnings:
+            card["warnings"] = warnings
     found = {c["id"] for c in cards}
     missing = [t for t in (args.task or []) if t not in found]
     now = int(time.time())
@@ -552,6 +687,7 @@ def report_text(cards: list[dict], totals: dict, missing: list[str]):
 
 def cmd_report(args) -> int:
     now = int(time.time())
+    workers = worker_processes()
     cards = []
     totals = {"by_status": {}, "run_seconds": 0, "fell_back": 0, "retried": 0}
     with connect(board_db(args.board)) as conn:
@@ -576,6 +712,7 @@ def cmd_report(args) -> int:
                     "runs": len(runs), "retried": was_retried(conn, row["id"]),
                     "duration_s": run_duration(last, now) if last else None,
                     "warnings": run_warnings(conn, row["id"], last)}
+            card["warnings"].update(duplicate_worker_warnings(row["id"], workers))
             cards.append(card)
             totals["by_status"][row["status"]] = totals["by_status"].get(row["status"], 0) + 1
             totals["run_seconds"] += sum(run_duration(run, now) or 0 for run in runs)
@@ -782,25 +919,40 @@ def cmd_follow(args) -> int:
     if card is None:
         output.finish(f"{args.task}: NOT_FOUND on board {args.board}")
         return 4
+    ppath = cpath.with_suffix(".progress")
+    saved = read_follow_progress(ppath)
+    sample = follow_progress(args.board, card)
+    change = progress_change(saved, sample)
+    unavailable_reported = saved.get("unavailable_reported", False) if saved.get("run_id") == sample["run_id"] else False
+    if saved and saved["run_id"] != sample["run_id"]:
+        after = 0
     output.emit(card_line(card))
     store = session_store(card.get("assignee"))
     session = None
+    messages_available = False
     quiet_since = time.time()
 
     def finish(status: str):
+        output.progress = change
+        output.unavailable = not messages_available and not unavailable_reported
         output.finish(status)
         # Compact messages stay buffered until finish. A killed call must leave
         # the saved cursor behind them so the next call can replay the batch.
         if args.compact:
             cpath.write_text(str(after))
+        write_seen(ppath, {**sample, "unavailable_reported": unavailable_reported or output.unavailable})
 
     while True:
+        if store is None:
+            store = session_store(card.get("assignee"))
         if store and session is None:
             session = find_session(store, args.task)
             if session and after == 0:
                 output.emit(f"session {session} in {store}")
         if store and session:
             rows = new_messages(store, session, after)
+            if not messages_available:
+                messages_available = has_worker_messages(store, session)
             if rows and after == 0 and len(rows) > args.backlog:
                 output.emit(f"... {len(rows) - args.backlog} earlier messages skipped")
                 rows = rows[-args.backlog:]
@@ -822,6 +974,14 @@ def cmd_follow(args) -> int:
                 output.quiet = False
         previous_run = (card.get("run") or {}).get("id")
         card = read_card(args.board, args.task) or card
+        current = follow_progress(args.board, card)
+        observed_change = progress_change(sample, current)
+        if current["run_id"] != sample["run_id"]:
+            change = "baseline"
+            unavailable_reported = False
+        elif observed_change == "advanced" or change != "advanced" and observed_change == "unknown":
+            change = observed_change
+        sample = current
         if card["status"] in TERMINAL:
             finish("FINAL " + card_line(card))
             return 0
@@ -835,7 +995,8 @@ def cmd_follow(args) -> int:
             session, after = None, 0
             if not args.compact:
                 cpath.write_text("0")
-        if time.time() - quiet_since > args.quiet_warn:
+        # Without worker messages (Codex) silence is not evidence; the card log decides.
+        if messages_available and time.time() - quiet_since > args.quiet_warn:
             if args.compact:
                 output.quiet = True
             else:
@@ -957,6 +1118,20 @@ def needs_items(board: str, since: int, ready_stale: int, ready_stale_capped: in
                 # Keyed by card, not event: a waiting lane re-runs and re-states the same wait.
                 items.append({"key": f"waiting:{r['task_id']}", "kind": "waiting_on_operator", "task": r["task_id"],
                               "at": r["created_at"], "text": reason[:2000]})
+        # A dependency wait can have no reason at all: Hermes puts the question in
+        # the finished run summary and parks the card back in todo/ready. Reuse the
+        # parent cursor key so opting into --created-by cannot double-report it.
+        for r in conn.execute(
+                f"select id, title, status, {('created_by' if has_creator else 'NULL')} as creator"
+                " from tasks where status in ('todo', 'ready')"):
+            if created_by is not None and (not has_creator or r["creator"] != created_by):
+                continue
+            waiting = parent_wait(conn, r["id"], r["status"])
+            if waiting and (waiting["at"] >= since or include_waiting_before):
+                parent[r["id"]] = {"key": f"parent:{r['id']}", "kind": "parent_question",
+                                   "task": r["id"], "at": waiting["at"],
+                                   "title": (r["title"] or "")[:120], "status": r["status"],
+                                   "text": (parent.get(r["id"], {}).get("text") or waiting["text"] or "")[:2000]}
         items.extend(parent.values())
         if loop_runs and conn.execute(
                 "select 1 from sqlite_master where type = 'table' and name = 'task_runs'").fetchone():

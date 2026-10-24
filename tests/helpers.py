@@ -76,7 +76,9 @@ elif args[:2] == ['kanban', '--board'] and len(args) > 3:
         kind, _, path = workspace.partition(':')
         card = {'id': task_id, 'title': args[4], 'assignee': value('--assignee'),
                 'body': value('--body'), 'workspace_kind': kind, 'workspace_path': path or None,
-                'model_override': value('--model'), 'provider_override': value('--provider')}
+                'model_override': value('--model'), 'provider_override': value('--provider'),
+                'created_by': value('--created-by') or 'user',
+                'max_runtime_seconds': int(value('--max-runtime')) if value('--max-runtime') else None}
         cards[task_id] = card
         store.write_text(json.dumps(cards))
         print(json.dumps(card))
@@ -88,7 +90,10 @@ elif args[:2] == ['kanban', '--board'] and len(args) > 3:
     elif action == 'show':
         card = cards[args[4]]
         card.update(json.loads(os.environ.get('FAKE_SHOW', '{}')))
-        print(json.dumps({'task': card, 'parents': [], 'children': [], 'runs': []}))
+        # Real show --json omits the runtime cap even though creation stores it.
+        card.pop('max_runtime_seconds', None)
+        runs = json.loads(os.environ.get('FAKE_RUNS', '{}')).get(args[4], [])
+        print(json.dumps({'task': card, 'parents': [], 'children': [], 'runs': runs}))
     else:
         sys.exit(2)
 else:

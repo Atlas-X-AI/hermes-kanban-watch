@@ -1,0 +1,4 @@
+{"type":"user","promptId":"p1","timestamp":"2026-10-20T00:00:00Z","message":{"role":"user","content":"[Workflow harness — user request] The harness relays, verbatim and indented below, the user request that triggered this workflow run.\n  User: please watch the board."}}
+{"type":"attachment","timestamp":"2026-10-20T00:00:00Z"}
+{"type":"user","promptId":"p1","timestamp":"2026-10-20T00:00:00Z","message":{"role":"user","content":"[Workflow harness — computed task] The task text below was computed at runtime by a workflow script.\n  Run `python3 /x/plugin/scripts/kanban_live.py cards --board default`."}}
+{"type":"assistant","timestamp":"2026-10-20T00:00:02Z","message":{"id":"msg_relay","model":"claude-haiku-5-5","usage":{"input_tokens":10,"output_tokens":2}}}

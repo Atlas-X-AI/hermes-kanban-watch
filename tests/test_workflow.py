@@ -1,6 +1,9 @@
 import json
+import os
 import re
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -107,9 +110,92 @@ def test_workflow_unknown_envelope_cannot_become_done(tmp_path, scenario):
     assert "cards" not in out["result"] and len(out["calls"]) == 1
 
 
+def check_feature_docs(plugin):
+    readme = (plugin / "README.md").read_text()
+    assert readme.count("\n## Features\n") == 1
+    assert readme.index("\n## Features\n") < readme.index("\n## Development checks\n")
+    features = readme.split("\n## Features\n", 1)[1].split("\n## ", 1)[0]
+    rule = "<!-- A new feature adds one file and one bullet, appended at the end of this list. -->"
+    assert features.lstrip().startswith(rule)
+    bullets = [line for line in features.splitlines() if line.startswith("- ")]
+    links = re.findall(r"^- \[[^\]]+\]\((docs/[a-z0-9]+(?:-[a-z0-9]+)*\.md)\): [^\n]+$",
+                       features, re.M)
+    assert bullets and len(links) == len(bullets), "Use one docs link and description per bullet"
+    assert re.findall(r"\[[^\]]+\]\(([^)]+)\)", features) == links
+    files = sorted(path.relative_to(plugin).as_posix()
+                   for path in (plugin / "docs").rglob("*") if path.is_file())
+    assert files, "Feature docs must not be empty"
+    assert sorted(links) == files, "Feature docs must be linked exactly once: " + repr((links, files))
+    for link in links:
+        assert (plugin / link).is_file(), "Unresolved feature link: " + link
+    development = readme.split("\n## Development checks\n", 1)[1].split("\n## ", 1)[0]
+    assert not re.search(r"^### ", development, re.M), "Feature section under Development checks"
+
+
+def test_feature_docs_layout():
+    check_feature_docs(PLUGIN)
+
+
+def test_round_two_skill_pointers():
+    skill_path = PLUGIN / "skills/kanban-watch/SKILL.md"
+    skill = skill_path.read_text()
+    assert len(skill.splitlines()) <= 150
+    links = re.findall(r"\[[^\]]+\]\((../../docs/[^)]+)\)", skill)
+    for name in ("wave-report", "verify-pair", "needs-loop", "pr-merge-receipt", "watcher-token-cost",
+                 "duplicate-workers-parent-questions", "fix-and-reverify", "workflow-wait-rounds",
+                 "standing-answers"):
+        link = "../../docs/" + name + ".md"
+        assert links.count(link) == 1, link
+        assert (skill_path.parent / link).is_file(), link
+    for line in skill.splitlines():
+        assert len(re.findall(r"\]\(../../docs/", line)) <= 1, "One feature pointer per line"
+    assert (ROOT / "README.md").read_text().count("(plugin/README.md#features)") == 1
+
+
+@pytest.mark.parametrize("change", ["unlinked", "duplicate", "unresolved", "development"])
+def test_feature_docs_reject_invalid_layout(tmp_path, change):
+    check_feature_docs(PLUGIN)
+    plugin = tmp_path / "plugin"
+    shutil.copytree(PLUGIN / "docs", plugin / "docs")
+    readme = (PLUGIN / "README.md").read_text()
+    bullet = re.search(r"^- \[[^\]]+\]\(docs/[^)]+\): .+$", readme, re.M).group()
+    if change == "unlinked":
+        (plugin / "docs/extra.md").write_text("# Extra\n")
+    elif change == "duplicate":
+        readme = readme.replace(bullet, bullet + "\n" + bullet)
+    elif change == "unresolved":
+        readme = readme.replace(bullet, "- [Missing](docs/missing.md): Missing file.")
+    else:
+        readme += "\n### Misplaced feature\n"
+    (plugin / "README.md").write_text(readme)
+    with pytest.raises(AssertionError):
+        check_feature_docs(plugin)
+
+
+def test_feature_docs_known_red_unlinked_file(tmp_path):
+    # A plain temp copy, with no git history, exercises the real pytest test.
+    copy = tmp_path / "copy"
+    shutil.copytree(PLUGIN / "docs", copy / "plugin/docs")
+    shutil.copyfile(PLUGIN / "README.md", copy / "plugin/README.md")
+    (copy / "tests").mkdir()
+    for name in ("test_workflow.py", "conftest.py", "helpers.py"):
+        shutil.copyfile(ROOT / "tests" / name, copy / "tests" / name)
+    command = [sys.executable, "-m", "pytest", "-q", "tests/test_workflow.py::test_feature_docs_layout"]
+    # The child checks only this repo's test, not unrelated installed plugins.
+    env = dict(os.environ, PYTEST_DISABLE_PLUGIN_AUTOLOAD="1")
+    green = subprocess.run(command, cwd=copy, env=env, capture_output=True, text=True, timeout=30)
+    assert green.returncode == 0, green.stdout + green.stderr
+    (copy / "plugin/docs/extra.md").write_text("# Extra\n")
+    red = subprocess.run(command, cwd=copy, env=env, capture_output=True, text=True, timeout=30)
+    print("Known-red temp copy:", copy)
+    print(red.stdout)
+    assert red.returncode == 1, red.stdout + red.stderr
+    assert "1 failed" in red.stdout and "docs/extra.md" in red.stdout
+
+
 def test_public_contract_metadata_agent_skill_hooks():
     manifest = json.loads((PLUGIN / ".claude-plugin/plugin.json").read_text())
-    assert manifest["name"] == "hermes-kanban-watch" and manifest["version"] == "0.2.0"
+    assert manifest["name"] == "hermes-kanban-watch" and manifest["version"] == "0.3.0"
     assert manifest["author"]["name"] and manifest["description"]
     hook = json.loads((PLUGIN / "hooks/hooks.json").read_text())["hooks"]["PostToolUse"][0]
     assert hook["matcher"] == "Bash"

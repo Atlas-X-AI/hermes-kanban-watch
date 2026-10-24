@@ -1,0 +1,2 @@
+{"type":"user","promptId":"p1","timestamp":"2026-10-20T00:00:00Z","message":{"role":"user","content":"Run `python3 kanban_live.py scout --board default` and return its JSON."}}
+{"type":"assistant","timestamp":"2026-10-20T00:00:02Z","message":{"id":"msg_scout","model":"claude-haiku-5-5","usage":{"input_tokens":10,"output_tokens":2}}}

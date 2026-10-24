@@ -21,7 +21,13 @@ const validCardId = id => {
   return false
 }
 const MAX_HOURS = A.max_hours || 12
+const MAX_WAIT_SECONDS = A.max_wait_seconds === undefined ? 14400 : A.max_wait_seconds
+if (!Number.isSafeInteger(MAX_WAIT_SECONDS) || MAX_WAIT_SECONDS <= 0) {
+  throw new Error('max_wait_seconds must be a positive safe integer')
+}
 const WAKE = 270 // below the 5-minute cache TTL
+// Match the dispatcher's one-hour heartbeat freshness window, not worker log activity.
+const HEARTBEAT_STALE = 3600
 // A card that flaps between blocked and running gets at most this many re-armed live rows.
 const MAX_REARMS = 5
 const READY_STALE = A.ready_stale || 900
@@ -243,6 +249,53 @@ const FLAG = {
   properties: { reason: { type: 'string', description: 'the block reason or what is waiting, verbatim, one paragraph' } },
   required: ['reason'],
 }
+// snapshot prints one JSON object per requested id, unlike cards' graph envelope.
+const WAIT_SNAPSHOT = {
+  type: 'object',
+  properties: { cards: { type: 'array', items: {
+    type: 'object', properties: {
+      id: { type: 'string' }, status: { type: 'string' },
+      current_run_id: { type: ['integer', 'null'] }, last_heartbeat_at: { type: ['integer', 'null'] },
+      run: { type: ['object', 'null'], properties: {
+        id: { type: 'integer' }, status: { type: 'string' },
+        started_at: { type: ['integer', 'null'] }, ended_at: { type: ['integer', 'null'] },
+      } },
+    }, required: ['id', 'status'],
+  } } },
+  required: ['cards'],
+}
+const checkWaitRound = async (watched, round, now) => {
+  const snapshot = await observe(
+    `${READ_ONLY}\n\nWait round ${round} used its exit-3 retries. Take one fresh snapshot: run ` +
+    `\`${LIVE} snapshot --board ${shellQuote(BOARD)}${watched.map(c => ` --task ${shellQuote(c.id)}`).join('')}\` once, without retries.` +
+    ` It prints one JSON object per id. Return those objects unchanged in cards; copy read_status and now from the final successful snapshot.`,
+    { agentType: AGENT_TYPE, model: 'haiku', effort: 'low',
+      label: `fresh snapshot after wait round ${round}`, phase: BOARD_PHASE, schema: WAIT_SNAPSHOT },
+  )
+  if (!snapshot) return null
+  if (snapshot.now < now) return unknown('wait snapshot clock moved backwards')
+  const byId = new Map(snapshot.cards.map(c => [c.id, c]))
+  if (byId.size !== watched.length || snapshot.cards.length !== watched.length || watched.some(c => !byId.has(c.id))) {
+    return unknown('wait snapshot missing or duplicate watched cards')
+  }
+  for (const c of snapshot.cards) {
+    if (!STATUSES.includes(c.status)) return unknown(`${c.id} has unknown status ${c.status}`)
+    // Queued children and parked cards still wait for starts/resumes. Only a
+    // running card needs a live current run and a fresh heartbeat to continue.
+    if (c.status !== 'running') continue
+    const run = c.run
+    if (!Number.isSafeInteger(c.current_run_id) || c.current_run_id <= 0 || !run || run.id !== c.current_run_id ||
+        run.status !== 'running' || run.ended_at !== null || !Number.isInteger(run.started_at) ||
+        run.started_at <= 0 || run.started_at > snapshot.now) {
+      return unknown(`${c.id} has no live current run`)
+    }
+    if (!Number.isInteger(c.last_heartbeat_at) || c.last_heartbeat_at < run.started_at ||
+        c.last_heartbeat_at > snapshot.now || snapshot.now - c.last_heartbeat_at > HEARTBEAT_STALE) {
+      return unknown(`${c.id} has a stale or missing heartbeat`)
+    }
+  }
+  return snapshot
+}
 const watchCard = async (c, version) => {
   const phaseTitle = assignPhase(c)
   const model = c.model || ''
@@ -254,6 +307,8 @@ const watchCard = async (c, version) => {
   const observed = await observe(
     `${READ_ONLY}\n\nYou are the live view of Kanban card ${c.id} ("${short(c.title, 120)}") on board ${BOARD}${who ? `, worked by ${who}` : ''}.` +
     ` the user opens you to watch its worker: each command prints what the worker says and every tool it calls, as it happens.\n` +
+    `The total watch deadline is Unix time ${waitDeadline}. Before each wait-start/follow call, read \`${LIVE} snapshot --board ${shellQuote(BOARD)} --task ${shellQuote(c.id)}\`.` +
+    ` If its now reaches the deadline, skip to step 3; otherwise shorten --max-seconds to the remaining seconds when less than ${WAKE} remain. This applies to all retries, including step 0.\n` +
     (queuedAtOpen
       ? `0. The card is still queued. Run \`${waitStart}\`. Exit 3 means still queued: run it again, up to 169 times. Exit 0: go on to step 1.` +
         ` Exit 6 (its last line is "status NOT_STARTING"): the card is ready and no dispatcher took it, so skip to step 3 and report verdict NOT_STARTING. Exit 4 or 5: skip to step 3.\n`
@@ -262,10 +317,14 @@ const watchCard = async (c, version) => {
     `2. Exit 3 means the card is still working: run \`${LIVE} follow --board ${shellQuote(BOARD)} --task ${shellQuote(c.id)} --cursor-key ${shellQuote(`wf${first.now}`)} ${shellQuote(FOLLOW_MODE)} --max-seconds ${WAKE} --quiet-warn 240\` again,` +
     ` and keep going until it exits 0. A card can run for hours; that is expected, so keep calling (up to 300 times). Reply with nothing between calls; just run the command again.\n` +
     `3. On exit 0 (a line starting FINAL), on 4/5, or after 300 calls, run \`${LIVE} snapshot --board ${shellQuote(BOARD)} --task ${shellQuote(c.id)}\` and report from its JSON:` +
-    ` verdict from status (done=DONE, blocked=BLOCKED, review=REVIEW, archived=ARCHIVED, running or queued after 300 calls=STILL_RUNNING${queuedAtOpen ? ', or NOT_STARTING when step 0 exited 6' : ''}),` +
+    ` verdict from status (done=DONE, blocked=BLOCKED, review=REVIEW, archived=ARCHIVED, running or queued after 300 calls or at the deadline=STILL_RUNNING${queuedAtOpen ? ', or NOT_STARTING when step 0 exited 6' : ''}),` +
     ` model_that_ran = run.model_used plus "(fallback from X)" when run.fallback_from is set, duration from run.started_at to run.ended_at,` +
     ` summary = run.summary verbatim; retried = snapshot.retried; warnings = snapshot.warnings verbatim ({} when empty).` +
-    ` If two follow calls in a row each printed "no new worker messages" while running, say "possibly wedged" in odd.`,
+    ` A heartbeat is never progress: a wedged worker keeps heartbeating.` +
+    ` If worker messages are available, say "possibly wedged" in odd when two follow calls in a row, while running, each printed "no new worker messages".` +
+    ` If follow reported "worker messages unavailable" for this run, progress is card-log growth only: say "possibly wedged" in odd when two follow calls in a row in the same run, while running, each report "progress flat".` +
+    ` "progress advanced" means the card log grew or changed; "progress baseline" (first call or new run) and "progress unknown" are not flat and reset the two-call count.` +
+    ` When worker messages unavailable was reported once, keep using the progress signal without requiring that notice to repeat.`,
     {
       agentType: AGENT_TYPE, model: 'sonnet', effort: 'low',
       label: `${short(c.title)} · ${c.id}${model ? ` · ${model}` : ''}${c.runs > 1 ? ` · run ${c.runs}` : ''}`,
@@ -357,6 +416,7 @@ if ((first.stale_skipped || []).length) {
   log(`Skipped queued cards older than ${STALE_DAYS} days: ${first.stale_skipped.join(', ')} (stale_days: 0 includes them; explicit task ids are always kept)`)
 }
 const since = first.now
+const waitDeadline = since + Math.min(MAX_HOURS * 3600, MAX_WAIT_SECONDS)
 
 const launched = new Set()
 const rowVersions = new Map()
@@ -441,6 +501,9 @@ const waitPhase = async (title, ids) => {
     const needsYou = notStarting.length > 0
     const waited = await observe(
       `${READ_ONLY}\n\nWaiting in ${title}: ${pending.map(c => `${c.id} ("${short(c.title)}")`).join(', ')}.` +
+      ` The total watch deadline is Unix time ${waitDeadline}. Before every wait-any call, read ` +
+      `\`${LIVE} snapshot --board ${shellQuote(BOARD)}${pending.map(c => ` --task ${shellQuote(c.id)}`).join('')}\`.` +
+      ` If its now reaches the deadline, return its read_status and now with exit:3, started:[] and cards:[] (no start observed); otherwise shorten --max-seconds to the remaining seconds when less than ${WAKE} remain.` +
       `${needsYou ? ` Not starting (ready, no dispatcher took them): ${notStarting.join(', ')}.` : ''} Run ` +
       `\`${LIVE} wait-any --board ${shellQuote(BOARD)}${pending.map(c => ` --task ${shellQuote(c.id)}`).join('')} --max-seconds ${WAKE}` +
       `${needsYou ? '' : ` --ready-stale ${shellQuote(READY_STALE)}`}\`. Retry only exit 3, up to 169 times.` +
@@ -519,8 +582,10 @@ log(`${Object.keys(cards).length} card(s): ${Object.keys(cards).length - waiting
 {
   // Use the successful reader's clock, not a number of rounds: repeated resumes
   // and newly filed cards must not consume the watch's whole time budget early.
-  const deadline = since + MAX_HOURS * 3600
+  const deadline = waitDeadline
   let observedNow = since
+  let waitRound = 0
+  let allFinished = false
   while (observedNow < deadline) {
     // Done and archived cards file nothing more, so they leave the creator/parent watch,
     // but every known id stays excluded from "new" via --known. A capped card is left alone.
@@ -532,14 +597,18 @@ log(`${Object.keys(cards).length} card(s): ${Object.keys(cards).length - waiting
     const retries = Math.min(13, Math.ceil((deadline - observedNow) / WAKE))
     const eventWake = Math.min(WAKE, Math.floor((deadline - observedNow) / retries))
     const parked = watched.every(c => ['blocked', 'review'].includes(c.status))
+    waitRound++
     const ev = await readCounted(
       `${READ_ONLY}\n\n${parked ? `Parked on blocked/review cards; keep waiting for resumes for up to ${MAX_HOURS} hours (MAX_HOURS), never call them all finished. ` : ''}` +
       `Run \`${eventCommand} --max-seconds ${eventWake}\`.` +
       ` Exit 3 means nothing new yet: run the same command again, up to ${retries} times. Stop on exit 0 (a watched card filed a new card, resumed, or stopped as blocked/review),` +
-      ` exit 2 (every watched card is done or archived: all_finished true) or 5. Return the last call's JSON: copy changed, new, count_changed and count_new exactly as printed.`,
+      ` exit 2 (every watched card is done or archived: all_finished true) or 5.` +
+      ` If every call exits 3, return the last successful JSON with timeout:true and read_status:OK; exhausted retries are not UNKNOWN.` +
+      ` The workflow owns continuation: it will take a fresh snapshot and open a new wait round for queued or parked cards, and for running cards with fresh current-run heartbeats.` +
+      ` Return the last call's JSON: copy changed, new, count_changed, count_new, all_finished and timeout exactly as printed.`,
       {
         agentType: AGENT_TYPE, model: 'haiku', effort: 'low',
-        label: parked ? 'parked on blocked/review cards; waiting for resumes' : A.follow_new === false ? 'watching for blocks and resumes' : 'watching for cards the workers file',
+        label: `wait round ${waitRound} · ` + (parked ? 'parked on blocked/review cards; waiting for resumes' : A.follow_new === false ? 'watching for blocks and resumes' : 'watching for cards the workers file'),
         phase: BOARD_PHASE, schema: EVENTS,
       },
       [['changed', 'count_changed'], ['new', 'count_new']],
@@ -547,6 +616,13 @@ log(`${Object.keys(cards).length} card(s): ${Object.keys(cards).length - waiting
     )
     if (!ev) break
     observedNow = Math.max(observedNow, ev.now)
+    if (ev.timeout && !ev.all_finished) {
+      const snapshot = await checkWaitRound(watched, waitRound, observedNow)
+      if (!snapshot) break
+      observedNow = Math.max(observedNow, snapshot.now)
+      // Apply the fresh statuses through the ordinary resume/finish path below.
+      ev.changed = [...ev.changed, ...snapshot.cards]
+    }
     for (const c of ev.changed || []) {
       const previous = cards[c.id]
       if (!previous) continue
@@ -579,11 +655,11 @@ log(`${Object.keys(cards).length} card(s): ${Object.keys(cards).length - waiting
       log(`new card ${c.id} "${short(c.title)}" in ${assignPhase(c)}`)
     }
     launchAll()
-    if (ev.all_finished) break
+    if (ev.all_finished) { allFinished = true; break }
   }
   const unfinished = Object.values(cards).filter(c => !FINAL.includes(c.status))
-  if (observedNow >= deadline && unfinished.length) {
-    log(`MAX_HOURS reached; still watched, not all finished: ${unfinished.map(c => `${c.id}=${c.status}`).join(', ')}`)
+  if (observedNow >= deadline && unfinished.length && !allFinished) {
+    unknown(`Watch deadline reached (max_wait_seconds ${MAX_WAIT_SECONDS}, max_hours ${MAX_HOURS}); still watched, not all finished: ${unfinished.map(c => `${c.id}=${c.status}`).join(', ')}`)
   }
 }
 
