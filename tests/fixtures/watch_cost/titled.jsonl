@@ -1,0 +1,2 @@
+{"type":"user","promptId":"p1","timestamp":"2026-10-20T00:00:00Z","message":{"role":"user","content":"You are the live view of Kanban card t_1 (\"rehome needs, fixes\"). Run `python3 kanban_live.py follow --task t_1`."}}
+{"type":"assistant","timestamp":"2026-10-20T00:00:02Z","message":{"id":"msg_titled","model":"claude-sonnet-5-5","usage":{"input_tokens":10,"output_tokens":2}}}

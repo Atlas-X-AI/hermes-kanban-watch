@@ -9,7 +9,7 @@
     {
       "name": "hermes-kanban-watch",
       "source": "./plugin",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "homepage": "https://github.com/Atlas-X-AI/hermes-kanban-watch",
       "repository": "https://github.com/Atlas-X-AI/hermes-kanban-watch",
       "description": "Watch Hermes Kanban workers as live, read-only Claude Code workflow rows."

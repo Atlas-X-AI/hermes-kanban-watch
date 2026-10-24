@@ -1,0 +1,2 @@
+{"type":"user","timestamp":"2026-10-20T00:00:00Z","message":{"content":"python3 kanban_live.py cards --board default"}}
+{"type":"assistant","timestamp":"2026-10-20T00:00:01Z","message":{"id":"msg_cards","model":"claude-haiku-5-5","usage":{"input_tokens":7,"output_tokens":2,"cache_read_input_tokens":50,"cache_creation_input_tokens":40}}}

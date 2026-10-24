@@ -30,6 +30,8 @@ This is a reader, not a dispatcher or a second owner of the work.
 | Setup checks | A credential-safe doctor, opt-in local setup and optional model probes. |
 | Portable routes | Your profiles, your models, with a different-family reviewer. |
 
+See the plugin's [Features list](plugin/README.md#features) for the round-2 commands and workflow details.
+
 ## Quick install
 
 In Claude Code 2.1.275 or later, install in one step:
@@ -72,7 +74,7 @@ Doctor reports PASS / FAIL / UNKNOWN. Exit 0 means no FAILs, not that UNKNOWNs
 were verified. It checks Hermes's version, board-file existence (not schema
 compatibility), `model.provider` and `model.default` in profile configs, routed
 profile existence and the reader on PATH. The reader's `--version` must print
-exactly `hermes-kanban-watch 0.2.0`. A foreign or stale `hermes-kanban-live` is FAIL,
+exactly `hermes-kanban-watch 0.3.0`. A foreign or stale `hermes-kanban-live` is FAIL,
 with its resolved path shown, even with `--fix`. Move that command aside or fix
 PATH before rerunning `--fix`, or use `args.live_cmd` for this plugin's reader.
 The doctor never overwrites a conflicting command. Existing unrelated

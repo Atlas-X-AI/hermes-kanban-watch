@@ -1,0 +1,4 @@
+{"type":"user","promptId":"p1","timestamp":"2026-10-20T10:39:10Z","message":{"role":"user","content":"Run python3 kanban_live.py follow --task t_1"}}
+{"type":"assistant","timestamp":"2026-10-20T10:39:14.231Z","message":{"id":"m1","model":"claude-sonnet-5-5","usage":{"input_tokens":3,"output_tokens":1,"cache_creation_input_tokens":100}}}
+{"type":"user","timestamp":"2026-10-20T10:48:14.947Z","message":{"content":[{"type":"tool_result","content":"event"}]}}
+{"type":"assistant","timestamp":"2026-10-20T10:48:18.093Z","message":{"id":"m2","model":"claude-sonnet-5-5","usage":{"input_tokens":3,"output_tokens":1,"cache_read_input_tokens":4404,"cache_creation_input_tokens":9009}}}

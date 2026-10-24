@@ -1,0 +1,7 @@
+# Example only: review capacity and the card's scope before running a suggestion.
+# Edit your own copy; answers.py only prints commands and never posts a reply.
+- id: capacity
+  match:
+    - 'EVO.*BUSY|load .* limit'
+  answer: "commit, push and let PR CI gate"
+  note: "Capacity is constrained; PR CI, not the loaded worker host, gates the full suite."

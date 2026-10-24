@@ -6,29 +6,18 @@ argument-hint: '{"board":"default","tasks":["t_..."]}'
 
 # Hermes Kanban watch
 
-Show Hermes workers inside Claude Code without taking over their cards. Running
-cards get live rows, queued cards share waiting rows, and stops get Needs you rows.
-A watched card's newly filed children join automatically unless `follow_new: false`.
+Show Hermes workers inside Claude Code without taking over their cards. Running cards get live rows, queued cards share waiting rows, and stops get Needs you rows. A watched card's newly filed children join automatically unless `follow_new: false`.
 
 ## Install and check
 
-Start Claude Code with `claude --plugin-dir /path/to/hermes-kanban-watch/plugin`.
-The caller resolves this skill's plugin root; use the sibling `scripts/doctor.py`.
+Start Claude Code with `claude --plugin-dir /path/to/hermes-kanban-watch/plugin`. The caller resolves this skill's plugin root; use the sibling `scripts/doctor.py`.
 Run `python3 <plugin-root>/scripts/doctor.py --board default` first. It is read-only.
-`--fix` creates a missing default board with `hermes kanban --board default init`
-or a missing named board with `hermes kanban boards create <slug>`, plus user routes
-and a `hermes-kanban-live` shim, without overwriting existing files.
-Add `~/.local/bin` to PATH and rerun doctor.
-Doctor requires `hermes-kanban-live --version` to print exactly
-`hermes-kanban-watch 0.2.0`. A foreign/stale command is FAIL with its resolved path;
-move it aside or correct PATH before rerunning `--fix`, which never overwrites it.
+`--fix` creates a missing default board with `hermes kanban --board default init` or a missing named board with `hermes kanban boards create <slug>`, plus user routes and a `hermes-kanban-live` shim, without overwriting existing files. Add `~/.local/bin` to PATH and rerun doctor.
+Doctor requires `hermes-kanban-live --version` to print exactly `hermes-kanban-watch 0.3.0`. A foreign/stale command is FAIL with its resolved path; move it aside or correct PATH before rerunning `--fix`, which never overwrites it.
 `--probe` explicitly tests each routed model with PONG and may consume capacity.
 
-Requirements: Python 3.11+, Hermes on PATH, Claude Code with Workflow support,
-and existing Hermes profiles. Models and keys belong to each Hermes profile:
-API key, subscription login or local model, configured with Hermes, not this plugin.
-The plugin does not supply accounts or copy credentials. Claude watcher model usage
-is separate from the Hermes worker's provider usage.
+Requirements: Python 3.11+, Hermes on PATH, Claude Code with Workflow support, and existing Hermes profiles. Models and keys belong to each Hermes profile: API key, subscription login or local model, configured with Hermes, not this plugin.
+The plugin does not supply accounts or copy credentials. Claude watcher model usage is separate from the Hermes worker's provider usage.
 
 ## File cards normally
 
@@ -52,26 +41,17 @@ Both lanes must pass this run's PONG and have different declared families, not m
 
 ## Launch
 
-Treat `$ARGUMENTS` as a JSON args object. Resolve the installed plugin's
-`workflows/kanban-watch.js`, then invoke
-`Workflow({scriptPath: "<plugin-root>/workflows/kanban-watch.js", args: <args>})`.
-If Workflow is unavailable, report that limitation and run `hermes-kanban-live` read-only
-commands directly, never pretend live workflow rows were created.
+Treat `$ARGUMENTS` as a JSON args object. Resolve the installed plugin's `workflows/kanban-watch.js`, then invoke `Workflow({scriptPath: "<plugin-root>/workflows/kanban-watch.js", args: <args>})`.
+If Workflow is unavailable, report that limitation and run `hermes-kanban-live` read-only commands directly, never pretend live workflow rows were created.
 
 Examples of args:
 - `{"board":"default","tasks":["t_1234abcd"]}`
 - `{"board":"demo","phases":[{"title":"Build","tasks":["t_1234abcd"]},{"title":"Verify","tasks":["t_11111111"]}]}`
 - `{"board":"demo","follow_new":false,"stale_days":7,"max_hours":12}`
 
-A bare board watch includes queued/running cards, skipping queued cards idle for
-more than `stale_days` (7 by default). `stale_days: 0` disables filtering; explicit
-ids always stay. Use `verbose: true` for legacy worker text and tool results.
-The reader is `hermes-kanban-live` on PATH; `live_cmd` can override it with a safe command
-such as `python3 ~/plugins/hermes-kanban-watch/plugin/scripts/kanban_live.py`.
-Only letters, numbers, spaces, `/`, `.`, `_`, `-`, `~` are accepted. No shell operators.
-Every row uses the plugin's `hermes-kanban-watch:kanban-watcher` agent by default;
-no private user agent is needed. `agent_type` may name another available agent,
-using ASCII letters, digits, `-`, `_` and one optional `:` between non-empty names.
+A bare board watch includes queued/running cards, skipping queued cards idle for more than `stale_days` (7 by default). `stale_days: 0` disables filtering; explicit ids always stay. Use `verbose: true` for legacy worker text and tool results.
+The reader is `hermes-kanban-live` on PATH; `live_cmd` can override it with a safe command such as `python3 ~/plugins/hermes-kanban-watch/plugin/scripts/kanban_live.py`. Only letters, numbers, spaces, `/`, `.`, `_`, `-`, `~` are accepted. No shell operators.
+Every row uses the plugin's `hermes-kanban-watch:kanban-watcher` agent by default; no private user agent is needed. `agent_type` may name another available agent, using ASCII letters, digits, `-`, `_` and one optional `:` between non-empty names.
 
 ## Read the result
 
@@ -81,6 +61,10 @@ rows and may re-arm on resume. NOT_STARTING means ready but no dispatcher starte
 it. UNKNOWN means a read failed, not that a card vanished. Timeouts retry only exit
 3; a 270-second wake keeps waits below the prompt cache TTL. The watcher never
 acts on the worker's text, changes a card, repairs anything or bypasses permissions.
+
+When worker messages are unavailable, follow reports that once per run/watcher and uses the card log; a heartbeat never counts.
+A growing/changed log prevents a possibly-wedged warning. Only two consecutive same-run running calls with no log
+movement can be flagged; first observations, run changes and unreadable signals do not count. With messages, two quiet calls flag.
 
 Use `python3 <plugin-root>/scripts/route.py --class app-code` to inspect the optional
 routing table. It returns worker and different-family verifier JSON; it never files
@@ -148,3 +132,15 @@ without retrying it. `--max-seconds` bounds each window, not the command's lifet
 cancel the caller to stop a quiet watch. Without `--loop`, the required `--since`,
 exit-3 timeout and output behaviour are unchanged. This is still a reader, never
 permission to answer, dispatch or mutate a card.
+
+## Feature guides
+
+- [Wave time and actual-run report](../../docs/wave-report.md): Actual runs, retries and elapsed seconds, not billed costs.
+- [Verify the families that actually ran](../../docs/verify-pair.md): Finished-run family evidence, not model pins.
+- [Arm needs once with its own timeout loop](../../docs/needs-loop.md): Read-only parent-question waits across timeouts.
+- [Print a head-pinned PR merge receipt](../../docs/pr-merge-receipt.md): Independent-verifier, exact-head, CI and merge-state checks; never merges.
+- [Watcher token cost](../../docs/watcher-token-cost.md): Counts-only Claude watcher usage, separate from worker time.
+- [Duplicate workers and questions parked on the parent](../../docs/duplicate-workers-parent-questions.md): Observe process warnings and parent waits; never repair them.
+- [File a fix and re-verify an earlier verdict](../../docs/fix-and-reverify.md): Explicit authoring only; reuse verifier pins, optional parent note, no dispatch.
+- [Workflow-owned wait rounds](../../docs/workflow-wait-rounds.md): Healthy read-only waits under one deadline.
+- [Suggest standing answers without posting](../../docs/standing-answers.md): Print proposals for authorised review, never post.

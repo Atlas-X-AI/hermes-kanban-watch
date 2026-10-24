@@ -1,0 +1,4 @@
+{"type":"started","agentId":"follow","label":"follow card"}
+{"type":"result","agentId":"follow","label":"finished"}
+{"type":"started","agentId":"cards","label":"read board"}
+{"type":"started","agentId":"non-watcher","label":"unrelated implementation"}
