@@ -6,22 +6,57 @@ import argparse
 from contextlib import contextmanager
 import fcntl
 import json
+import math
 from pathlib import Path
 import os
 import re
 import sqlite3
 import subprocess
 import sys
+import time
 
 from board_watch import atomic_json, short, summary, wait
 from notify_session import notify
 
 
 @contextmanager
+def lease_lock(config):
+    """Lock a stable inode; the JSON lease itself is atomically replaced."""
+    path = Path(config["lease"])
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with Path(str(path) + ".lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield path
+
+
+def read_lease(path):
+    """Read under lease_lock; safely collapse the old append bug, not unknown data."""
+    text = path.read_text().strip() if path.exists() else ""
+    if not text:
+        return {}
+    decoder, records = json.JSONDecoder(), []
+    while text:
+        record, end = decoder.raw_decode(text)
+        if (not isinstance(record, dict) or not isinstance(record.get("launch_id"), str) or
+                not record["launch_id"] or not isinstance(record.get("until"), (int, float)) or
+                isinstance(record["until"], bool) or not math.isfinite(record["until"]) or
+                not isinstance(record.get("stopped", False), bool)):
+            raise ValueError("Malformed lease; ownership UNKNOWN")
+        records.append(record)
+        text = text[end:].lstrip()
+    if len(records) > 1:
+        if any(not old.get("stopped") and old["until"] > time.time() for old in records[:-1]):
+            raise ValueError("Conflicting live lease records; ownership UNKNOWN")
+        # Legacy a+ writes can only supersede an inactive lease. Preserve the
+        # final owner's state: recovery is never permission to start a duplicate.
+        atomic_json(path, records[-1])
+    return records[-1]
+
+
+@contextmanager
 def owned_lease(config):
-    with Path(config["lease"]).open() as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        lease = json.load(f)
+    with lease_lock(config) as path:
+        lease = read_lease(path)
         if lease.get("launch_id") != config["launch_id"] or lease.get("stopped"):
             raise ValueError("Watch lease superseded or stopped; nothing delivered")
         yield
@@ -132,15 +167,10 @@ def relay_tick(config):
 
 def release_lease(config):
     """Release only this launch's local lease, never a card or another watcher."""
-    import fcntl
-
-    with Path(config["lease"]).open("r+") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        lease = json.load(f)
+    with lease_lock(config) as path:
+        lease = read_lease(path)
         if lease.get("launch_id") == config["launch_id"]:
-            f.seek(0)
-            json.dump({**lease, "stopped": True}, f)
-            f.truncate()
+            atomic_json(path, {**lease, "stopped": True})
 
 
 def main():

@@ -5,6 +5,9 @@
 - Use Claude Code background Bash waits with completion notifications, not a
   synchronous 960-second wait. Keep the 900-second cadence and Hermes timeout.
 - Isolate all four XDG roots per test, including inherited XDG_STATE_HOME leases.
+- Replace lease JSON atomically under one stable sidecar lock. Stopped/expired
+  watchers can relaunch without appending JSON; safely recover legacy append
+  records only when prior owners are inactive, preserving a live final owner.
 - Add optional `--discord-channel` direct helper reports through the lint-gated,
   read-back-verified messaging sender. Render at most eight safe state-marked
   lines with the starting-session source footer; never copy card text to Discord.

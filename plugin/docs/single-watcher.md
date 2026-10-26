@@ -160,6 +160,17 @@ Poller health, idle-prompt behaviour and human receipt require a live proof.
 State is private under `XDG_STATE_HOME/hermes-kanban-watch` (default
 `~/.local/state/hermes-kanban-watch`). A board lease prevents a second native or
 bridge watcher; systemd's unit name is a second bridge-only singleton gate.
+Reserve, ownership checks and release share a stable `.lock` sidecar. Lease JSON
+is replaced atomically, never appended or locked by its replaceable inode.
+Stopped or expired leases are free for the next launch.
+
+For legacy append-corruption, all records must be valid lease objects and every
+prefix owner must be stopped or expired. The helper atomically retains only the
+last record. A live last owner still refuses a new launch; its existing prepared
+config can resume with the fixed helper, then release normally. Malformed data
+or a conflicting live prefix remains UNKNOWN and is never discarded. Do not
+run old and new watcher versions concurrently against the same lease.
+
 Final/max_hours/UNKNOWN-read stops release the local lease. A killed watcher or
 failed delivery keeps it until its deadline; inspect it rather than silently
 starting a duplicate. No state directory is automatically removed.

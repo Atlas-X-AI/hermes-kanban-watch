@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import math
 import os
@@ -20,24 +19,17 @@ import uuid
 
 from board_watch import atomic_json, board_path, positive, snapshot, validate_scope
 from notify_session import resolve_pane
-from watcher_tick import release_lease
+from watcher_tick import lease_lock, read_lease, release_lease
 
 PLUGIN = Path(__file__).resolve().parents[1]
 
 
 def reserve(config):
-    path = Path(config["lease"])
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with path.open("a+") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        f.seek(0)
-        text = f.read()
-        current = json.loads(text) if text else {}
+    with lease_lock(config) as path:
+        current = read_lease(path)
         if current and not current.get("stopped") and current["until"] > time.time():
             raise ValueError("This board already has a watcher lease; do not start a second watcher")
-        f.seek(0)
-        json.dump({"launch_id": config["launch_id"], "until": config["until"], "stopped": False}, f)
-        f.truncate()
+        atomic_json(path, {"launch_id": config["launch_id"], "until": config["until"], "stopped": False})
 
 
 def launch(args):
