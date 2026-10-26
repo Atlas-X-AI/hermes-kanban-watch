@@ -82,16 +82,13 @@ def discord_draft(wake, session):
         done = counts.get("done", 0) + counts.get("archived", 0)
         running = counts.get("running", 0)
         waiting = len(data["cards"]) - done - running
-        problems = len(data["problems"])
-        heading = ("🟢 FINAL: All watched work is finished." if reason == "final" else
-                   "🟡 Watch time limit reached; completion UNKNOWN." if reason == "max_hours" else
-                   "🔴 Kanban problems need attention." if problems else "🟣 Kanban progress update.")
-        lines = [heading, f"🟢 Done: {done}", f"🟣 Running: {running}", f"🟡 Waiting: {waiting}",
-                 f"{'🔴' if problems else '🟢'} Problems: {problems}",
-                 "🟢 Rough time left: 0." if reason == "final" else "🟡 Rough time left: UNKNOWN.",
-                 "🟠 The starting session needs to investigate." if problems else
-                 "🟡 The starting session needs to check unfinished work." if reason == "max_hours" else
-                 "🟢 Nothing needed." if reason == "final" else "🟣 Work continues; nothing needed."]
+        # Progress and the final note only: problems are the starting session's to handle
+        # (operator ruling, 2026-10-26: progress and results only).
+        final = reason == "final"
+        lines = ["🟢 FINAL: All watched work is finished." if final else "🟣 Kanban progress update.",
+                 f"🟢 Done: {done}", f"🟣 Running: {running}", f"🟡 Waiting: {waiting}",
+                 "🟢 Rough time left: 0." if final else "🟡 Rough time left: UNKNOWN.",
+                 "🟢 Nothing needed." if final else "🟣 Work continues; nothing needed."]
     return "\n".join([*lines, f"-# Source: {session}"])
 
 
@@ -136,8 +133,11 @@ def relay_tick(config):
     # inbox write idempotent. Never advance the delivery cursor on a failed send.
     discord = bool(config.get("discord_channel"))
     key = f"kanban-watch:{config['launch_id']}:{relay['sequence']}"
+    # Discord carries the 15-minute progress and the final note only. A problem between
+    # summaries, a time-limit stop or a failed read reaches only the starting session.
+    to_discord = discord and (reason == "final" or bool(wake.get("summary_due")))
     with owned_lease(config):
-        if discord and not relay.get("discord_receipt"):
+        if to_discord and not relay.get("discord_receipt"):
             try:
                 relay["discord_receipt"] = send_discord(config, wake)
                 # If the inbox fails next, an authorised retry must not repost.

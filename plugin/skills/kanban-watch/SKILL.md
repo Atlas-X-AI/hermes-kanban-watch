@@ -29,10 +29,11 @@ bash <plugin-root>/scripts/start_watcher.sh --prepare-only --board demo --sessio
 ```
 
 For an operator working in Discord, this is the default: supply their current
-session channel ID. The helper posts summaries, problems and FINAL directly with
-`~/.claude/skills/messaging-hayden/bin/send-hayden.sh`; no model formats or sends
-those reports. The starting session receives only problem and FINAL/stop notes
-via `notify_session.py`, never routine summaries, and does not relay reports.
+session channel ID. The helper posts the 15-minute progress summaries and the FINAL
+note directly with `~/.claude/skills/messaging-hayden/bin/send-hayden.sh`; no model
+formats or sends those reports. Problems, time-limit stops and failed reads never go
+to the operator's channel: the starting session receives them (with FINAL) via
+`notify_session.py`, handles them itself, and does not relay reports.
 Omit `--discord-channel` when not working in Discord; all inbox/relay behaviour
 then stays unchanged. The exact starting session supplies the source footer.
 

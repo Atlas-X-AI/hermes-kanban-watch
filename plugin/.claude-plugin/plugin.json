@@ -1,6 +1,6 @@
 {
   "name": "hermes-kanban-watch",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "One read-only native watcher per Kanban board, with 15-minute summaries and immediate problem alerts.",
   "author": {
     "name": "Atlas X AI",

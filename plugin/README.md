@@ -1,4 +1,4 @@
-# hermes-kanban-watch 0.4.1
+# hermes-kanban-watch 0.4.2
 
 For marketplace installation, setup and the complete guide, see the
 [repository README](https://github.com/Atlas-X-AI/hermes-kanban-watch#readme).
@@ -77,7 +77,7 @@ Doctor prints PASS / FAIL / UNKNOWN for each check and a summary. Exit 0 means n
 FAILs, not that UNKNOWNs were verified. Without flags, it only checks Hermes's
 version, the board file, the two model keys in each profile config, route profile
 existence and `hermes-kanban-live` on PATH. Its `--version` must print exactly
-`hermes-kanban-watch 0.4.1`. A foreign or stale command is FAIL with its resolved
+`hermes-kanban-watch 0.4.2`. A foreign or stale command is FAIL with its resolved
 path shown; move it aside or correct PATH, then rerun `--fix`, or set `args.live_cmd`
 to this plugin's reader. Existing unrelated `kanban-live` commands are not used
 or changed. It never opens `.env`, `auth.json`, sessions

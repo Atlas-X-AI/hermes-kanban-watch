@@ -35,7 +35,7 @@ missing default board with `hermes kanban --board default init` or a missing
 named board with `hermes kanban boards create <slug>`, plus user routes and a
 local `hermes-kanban-live` reader shim, without overwriting existing files.
 Doctor checks the resolved command's `--version` against the installed plugin
-identity (`hermes-kanban-watch 0.4.1`), not merely its presence on PATH. Foreign
+identity (`hermes-kanban-watch 0.4.2`), not merely its presence on PATH. Foreign
 or stale commands fail with their path shown; their output is omitted and
 `--fix` never replaces them. This identity check is not a cryptographic trust
 check: only execute commands from trusted PATH directories.
