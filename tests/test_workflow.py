@@ -195,16 +195,19 @@ def test_feature_docs_known_red_unlinked_file(tmp_path):
 
 def test_public_contract_metadata_agent_skill_hooks():
     manifest = json.loads((PLUGIN / ".claude-plugin/plugin.json").read_text())
-    assert manifest["name"] == "hermes-kanban-watch" and manifest["version"] == "0.3.0"
+    assert manifest["name"] == "hermes-kanban-watch" and manifest["version"] == "0.4.0"
     assert manifest["author"]["name"] and manifest["description"]
     hook = json.loads((PLUGIN / "hooks/hooks.json").read_text())["hooks"]["PostToolUse"][0]
     assert hook["matcher"] == "Bash"
     assert "${CLAUDE_PLUGIN_ROOT}/hooks/kanban_watch_nudge.py" in hook["hooks"][0]["command"]
     agent = (PLUGIN / "agents/kanban-watcher.md").read_text()
     assert "tools: Bash, Read" in agent and "model: sonnet" in agent and "## Never" in agent
-    assert "hermes-kanban-live follow" in agent and "UNKNOWN" in agent
-    assert "agentType hermes-kanban-watch:kanban-watcher" in agent
+    assert "watcher_tick.py" in agent and "UNKNOWN" in agent
+    assert "background" in agent and "Workflow is legacy" in agent
     skill = (PLUGIN / "skills/kanban-watch/SKILL.md").read_text()
+    assert "--prepare-only" in skill and "15 minutes" in skill
+    assert "Luna" in skill and "GLM" in skill and "doctrine/running-a-kanban.md" in skill
+    assert "Workflow({" not in skill
     assert len(skill.splitlines()) <= 150 and "/kanban-watch" in skill
     readme = (ROOT / "README.md").read_text()
     for document in (readme, (PLUGIN / "README.md").read_text()):

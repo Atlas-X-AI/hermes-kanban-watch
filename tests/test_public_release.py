@@ -31,7 +31,7 @@ def test_project_version_and_ci():
     version = (ROOT / "VERSION").read_text().strip()
     manifest = json.loads((PLUGIN / ".claude-plugin/plugin.json").read_text())
     assert project["project"]["name"] == manifest["name"]
-    assert project["project"]["version"] == manifest["version"] == version == "0.3.0"
+    assert project["project"]["version"] == manifest["version"] == version == "0.4.0"
     assert project["project"]["requires-python"] == ">=3.11"
     assert any(dep.split(">=")[0] == "pytest" for dep in project["dependency-groups"]["dev"])
     ci = (ROOT / ".github/workflows/ci.yml").read_text()

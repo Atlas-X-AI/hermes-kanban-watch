@@ -12,8 +12,14 @@ board databases. There is no promised response-time SLA.
 
 Every watcher is read-only with respect to Hermes boards, cards and worker
 sessions. It never claims, dispatches, comments, repairs, approves or changes
-permissions. The reader opens SQLite stores read-only; `follow` and `needs` save
-only local progress cursors under `~/.cache/hermes-kanban-watch/live/`.
+permissions. The default `board_watch.py` opens only the board, in SQLite
+mode=ro/query_only, never a worker profile or session store. Watcher leases,
+cursors and pending receipts are local state, not board mutations.
+`notify_session.py` may insert one explicit exact-session inbox row and reads it
+back; this is its only external write. It never types directly into tmux and
+refuses missing/ambiguous session targets. Native parent stdout is not proven
+delivery. The legacy reader's `follow` and `needs` save only local progress
+cursors under `~/.cache/hermes-kanban-watch/live/`.
 
 The plugin never reads `.env`, `auth.json` or other credential files and holds no
 credentials. Doctor selects only `model.provider` and `model.default` from profile
@@ -25,7 +31,7 @@ missing default board with `hermes kanban --board default init` or a missing
 named board with `hermes kanban boards create <slug>`, plus user routes and a
 local `hermes-kanban-live` reader shim, without overwriting existing files.
 Doctor checks the resolved command's `--version` against the installed plugin
-identity (`hermes-kanban-watch 0.3.0`), not merely its presence on PATH. Foreign
+identity (`hermes-kanban-watch 0.4.0`), not merely its presence on PATH. Foreign
 or stale commands fail with their path shown; their output is omitted and
 `--fix` never replaces them. This identity check is not a cryptographic trust
 check: only execute commands from trusted PATH directories.
