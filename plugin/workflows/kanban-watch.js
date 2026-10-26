@@ -1,8 +1,9 @@
 // Read-only Kanban watchers: no agent claims, edits, dispatches or comments on a card.
+// LEGACY, explicit opt-in only. The default skill uses one native background agent.
 export const meta = {
   name: 'kanban-watch',
-  description: 'Kanban cards shown as a dynamic workflow: parent DONE reports open child rows without polling, other queued cards share a waiting row per stage, and a ⚠ row under Needs you shows blocks',
-  whenToUse: 'Right after filing or dispatching Kanban cards, so the user sees them like native workflow agents: phases are the wave stages, each started card is a row they can open to watch its worker live. args: {board: "<slug>", phases?: [{title: "Build", tasks: ["t_..."]}, ...], tasks?: ["t_..."], follow_new?: true, max_hours?: 12, stale_days?: 7, verbose?: false}. A bare board watch logs and skips queued cards older than stale_days; 0 includes them; explicit tasks are always kept. Compact worker output is the default; verbose: true shows legacy worker text and tool results. Give phases when you know the wave shape; without them stages come from the parent links. Cards that a watched card files later join under "Filed by <that card>".',
+  description: 'LEGACY (explicit opt-in only): Kanban cards shown as workflow rows; the default is one native watcher per board',
+  whenToUse: 'Only when the caller explicitly names plugin/workflows/kanban-watch.js. This is NOT the default dynamic workflow or Kanban watch. Legacy options: phases are the wave stages, each started card is a row they can open to watch its worker live. args: {board: "<slug>", phases?: [{title: "Build", tasks: ["t_..."]}, ...], tasks?: ["t_..."], follow_new?: true, max_hours?: 12, stale_days?: 7, verbose?: false}. A bare board watch logs and skips queued cards older than stale_days; 0 includes them; explicit tasks are always kept. Compact worker output is the default; verbose: true shows legacy worker text and tool results. Give phases when you know the wave shape; without them stages come from the parent links. Cards that a watched card files later join under "Filed by <that card>".',
 }
 
 const A = args || {}

@@ -20,6 +20,10 @@ def isolated_home(tmp_path, monkeypatch):
     hermes.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("HERMES_HOME", str(hermes))
+    for kind in ("CACHE", "CONFIG", "DATA", "STATE"):
+        monkeypatch.setenv(f"XDG_{kind}_HOME", str(tmp_path / f"xdg-{kind.lower()}"))
+    # A test must explicitly install its fake sender; never inherit an outbound route.
+    monkeypatch.setenv("KANBAN_WATCH_DISCORD_SENDER", str(home / "no-discord-sender"))
     for name in tuple(os.environ):
         if name.startswith("HERMES_KANBAN_") or name == "KANBAN_WATCH_ROUTES":
             monkeypatch.delenv(name, raising=False)

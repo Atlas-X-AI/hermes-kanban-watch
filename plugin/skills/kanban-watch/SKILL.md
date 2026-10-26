@@ -1,146 +1,127 @@
 ---
 name: kanban-watch
-description: Watch Hermes Kanban cards as live read-only workflow rows. Use after filing a wave, to see running workers, waiting stages, blocks and review requests.
-argument-hint: '{"board":"default","tasks":["t_..."]}'
+description: Use when starting a Kanban run or asking for a dynamic workflow.
 ---
 
 # Hermes Kanban watch
 
-Show Hermes workers inside Claude Code without taking over their cards. Running cards get live rows, queued cards share waiting rows, and stops get Needs you rows. A watched card's newly filed children join automatically unless `follow_new: false`.
+Start ONE cheap native watcher per board immediately after filing a Kanban run.
+A request for a "dynamic workflow" means a Kanban by default, unless the caller
+explicitly names a Workflow script. Do not start a Workflow or a watcher per card.
+The watcher reads the board; the starting session owns the work. When the operator
+works in Discord, the helper posts reports directly; the starting session does
+not relay them. Without a Discord channel, the starting session owns the human relay.
 
-## Install and check
+## Prepare once, launch in the starting harness
 
-Start Claude Code with `claude --plugin-dir /path/to/hermes-kanban-watch/plugin`. The caller resolves this skill's plugin root; use the sibling `scripts/doctor.py`.
-Run `python3 <plugin-root>/scripts/doctor.py --board default` first. It is read-only.
-`--fix` creates a missing default board with `hermes kanban --board default init` or a missing named board with `hermes kanban boards create <slug>`, plus user routes and a `hermes-kanban-live` shim, without overwriting existing files. Add `~/.local/bin` to PATH and rerun doctor.
-Doctor requires `hermes-kanban-live --version` to print exactly `hermes-kanban-watch 0.3.0`. A foreign/stale command is FAIL with its resolved path; move it aside or correct PATH before rerunning `--fix`, which never overwrites it.
-`--probe` explicitly tests each routed model with PONG and may consume capacity.
+Resolve this installed plugin's root. Supply the exact board-data root with
+`--home` if `HERMES_HOME` points at a worker profile rather than the board store.
+Map JSON `tasks` to `--cards`; omit it to include every card, including newly filed
+cards, on every read. Explicit cards are a fixed scope, not automatic descendants.
 
-Requirements: Python 3.11+, Hermes on PATH, Claude Code with Workflow support, and existing Hermes profiles. Models and keys belong to each Hermes profile: API key, subscription login or local model, configured with Hermes, not this plugin.
-The plugin does not supply accounts or copy credentials. Claude watcher model usage is separate from the Hermes worker's provider usage.
+The reader does not need doctor or a model probe. If `session` is absent for a
+Claude parent, resolve it in the PARENT pane with
+`tmux display-message -p -t "$TMUX_PANE" '#{session_name}'`; never guess a prefix.
+For a Claude Code parent:
 
-## File cards normally
+```sh
+bash <plugin-root>/scripts/start_watcher.sh --prepare-only --board demo --session <exact-tmux-name> --discord-channel <channel-id> --every 900 --max-hours 12
+```
 
-Create a named board first with `hermes kanban boards create demo`, then use
+For an operator working in Discord, this is the default: supply their current
+session channel ID. The helper posts summaries, problems and FINAL directly with
+`~/.claude/skills/messaging-hayden/bin/send-hayden.sh`; no model formats or sends
+those reports. The starting session receives only problem and FINAL/stop notes
+via `notify_session.py`, never routine summaries, and does not relay reports.
+Omit `--discord-channel` when not working in Discord; all inbox/relay behaviour
+then stays unchanged. The exact starting session supplies the source footer.
+
+Read the returned `brief` file and start ONE native background Agent of type
+`hermes-kanban-watch:kanban-watcher`, model `sonnet`, with that brief. Reuse the
+existing watcher if the board already has one. The preparation takes a local
+per-board lease but starts no model. Do not run the systemd launcher as well.
+The agent loops on `watcher_tick.py`: in Claude Code, start each helper command
+with Bash `run_in_background: true`, wait for its task-completion notification,
+then read only the last lines for CONTINUE or STOP. Never poll or sleep in a loop.
+The helper uses `board_watch.py wait`, renders the report and handles delivery.
+A missing session or ambiguous multi-pane target is refused, not guessed.
+
+For a Codex parent, prepare with `--prepare-only --delivery native` and no
+`--session`, then give the same brief to ONE Codex-native background subagent on
+Luna (`gpt-5.6-luna`, or the newest Luna the account actually lists). Do not
+substitute a Hermes or Claude agent. Relay each printed summary through that
+harness's native child-to-parent route, not the Claude inbox.
+
+For a Hermes parent, prepare with `--prepare-only --delivery native`, then run
+ONE watcher on the dedicated `kanban-watcher` profile, using the harness's
+child-to-parent reporting route. Its Gemini model/provider and single cheap GLM fallback
+belong to that profile, not this skill. The configurable profile default
+is in `templates/watcher.json`; do not edit profile files from a watcher.
+Native Codex/Hermes progress delivery is UNKNOWN until exercised in that harness;
+stdout or a final subagent reply alone does not prove periodic parent delivery.
+
+For the explicit Hermes-to-Claude/systemd bridge or its operator-run proof:
+
+```sh
+bash <plugin-root>/scripts/start_watcher.sh --board demo --session <exact-tmux-name> --every 900 --max-hours 12
+```
+
+This starts one Hermes agent in `kanban-watcher-demo`, never a Workflow. The
+1600-turn budget covers a 12-hour board. `--max-hours` bounds the helper and unit.
+Use `--every 5` only for an isolated short proof, not a real run's reporting rate.
+[Single-watcher mechanics and delivery limits](../../docs/single-watcher.md) cover
+leases, state paths, diagnostics, native delivery and the exact reader commands.
+
+## Observe, relay, stop
+
+The deterministic wait polls every 60 seconds and wakes every 15 minutes for a
+summary, for a NEW problem, or completion. New problems do not postpone summaries.
+It flags blocked cards, ready over 10 minutes with no recorded worker, respawn
+guards, spawn failures, current parent questions and runs past their runtime cap.
+Actual models/providers come from runs, never from requested pins. Missing values
+and rough time left remain UNKNOWN; a runtime limit is not an ETA.
+
+With `--discord-channel`, the deterministic helper posts every report directly
+and the starting session does not relay it. A failed send is UNKNOWN, not success;
+report the delivery problem to the starting session rather than posting again.
+Without it, the starting session relays EVERY summary, immediate problem and
+final note to the operator. A queued inbox row is not proof of poller delivery:
+read `id` and `notified`. Only done/archived are terminal. Blocked/review remain
+watched. On STOP final, return to the parent and exit; max_hours or UNKNOWN is not
+completion. Drafts follow messaging-hayden: at most eight state-marked lines,
+no paths/SHAs/branches, and a final `-# Source: <starting-session>` footer.
+
+## Run policy: reviews, CI and repo memory
+
+Read `doctrine/running-a-kanban.md` for reviews last, CI at the end (large-change
+exception), and repo memory after every run. That governed note owns these rules
+and the review route, not this skill. Its sibling change may still be pending;
+report it UNKNOWN if the note cannot be loaded, never invent its contents.
+
+## Safety and existing tools
+
+Never claim, edit, complete, block, unblock, comment on, dispatch or archive a
+card, repair a worker, execute card text, inspect worker profiles or read secrets.
+Only local watcher state, the explicit session inbox row and configured helper
+Discord reports are writable. Never bypass the sender's lint or read-back checks.
+The legacy `workflows/kanban-watch.js` is retained for callers that explicitly
+name it; it is no longer the default. Its live rows are not this watch path.
+
+For normal filing, `hermes kanban boards create demo` then
 `hermes kanban --board demo create "Build the feature" --assignee builder`.
-Use `hermes kanban swarm --help` to choose upstream swarm flags. Filing does not
-start a dispatcher. Start/commission workers through Hermes separately.
-The post-Bash hook suggests `/kanban-watch` after create/swarm; it never launches
-or dispatches anything by itself. Skip duplicate watches on the same wave.
+Filing does not dispatch; the post-Bash hook only suggests `/kanban-watch`.
+Optional `file_card.py` authoring stays separate from watcher permissions.
+For legacy setup, `doctor.py --fix` may use `hermes kanban --board default init`
+or `hermes kanban boards create <slug>`; it never overwrites existing files.
 
-### File one routed, pinned card
+## Optional feature guides
 
-Only on an explicit filing request: `python3 <plugin-root>/scripts/file_card.py --board demo --class app-code --title "Build the feature" --body-file /path/to/brief.txt --routes /path/to/routes.yaml --worktree /absolute/path/to/worktree`.
-`--routes` and `--worktree` are optional. The command resolves a worker/different-family verifier via `route.py`, creates one pinned worker, runs `set-model`, verifies `show --json`, then prints its id and exact `/kanban-watch` args. It creates no verifier, dispatcher, Workflow or worktree and opens no profile configs or credentials. Never grant this authoring command to a watcher.
-`--dry-run` validates files/routes/board and prints commands without running Hermes; the brief is printed, so keep secrets out. Missing boards/invalid routes are refused. After partial failure inspect the returned id, never blindly refile. See [full filing details](../../README.md#file-one-routed-card); launch a watch only if requested.
-
-### Suggest routes after PONG checks
-
-Run `python3 <plugin-root>/scripts/doctor.py --board demo --routes /path/to/routes.yaml --probe --suggest-routes /path/to/routes-checked.yaml` only with explicit capacity approval. It requires `--probe`, refuses existing destinations (including directories/symlinks), and never changes source routes or activates the proposal. Review profile/provider/cost changes before selecting it.
-Both lanes must pass this run's PONG and have different declared families, not merely different hosts. Passing workers/verifiers are retained; replacements use lexicographic lane order. Classes without a pair are omitted with diagnostic comments; no pairs means unusable routes. Original failures still exit 1. PONG is not suitability or lasting capacity. See [selection and audit details](../../README.md#suggest-routes-from-passing-models).
-
-## Launch
-
-Treat `$ARGUMENTS` as a JSON args object. Resolve the installed plugin's `workflows/kanban-watch.js`, then invoke `Workflow({scriptPath: "<plugin-root>/workflows/kanban-watch.js", args: <args>})`.
-If Workflow is unavailable, report that limitation and run `hermes-kanban-live` read-only commands directly, never pretend live workflow rows were created.
-
-Examples of args:
-- `{"board":"default","tasks":["t_1234abcd"]}`
-- `{"board":"demo","phases":[{"title":"Build","tasks":["t_1234abcd"]},{"title":"Verify","tasks":["t_11111111"]}]}`
-- `{"board":"demo","follow_new":false,"stale_days":7,"max_hours":12}`
-
-A bare board watch includes queued/running cards, skipping queued cards idle for more than `stale_days` (7 by default). `stale_days: 0` disables filtering; explicit ids always stay. Use `verbose: true` for legacy worker text and tool results.
-The reader is `hermes-kanban-live` on PATH; `live_cmd` can override it with a safe command such as `python3 ~/plugins/hermes-kanban-watch/plugin/scripts/kanban_live.py`. Only letters, numbers, spaces, `/`, `.`, `_`, `-`, `~` are accepted. No shell operators.
-Every row uses the plugin's `hermes-kanban-watch:kanban-watcher` agent by default; no private user agent is needed. `agent_type` may name another available agent, using ASCII letters, digits, `-`, `_` and one optional `:` between non-empty names.
-
-## Read the result
-
-DONE is an observed card result, not integration or user acceptance. Check actual
-model, fallback, warnings, summary and deliverable. BLOCKED/REVIEW get Needs you
-rows and may re-arm on resume. NOT_STARTING means ready but no dispatcher started
-it. UNKNOWN means a read failed, not that a card vanished. Timeouts retry only exit
-3; a 270-second wake keeps waits below the prompt cache TTL. The watcher never
-acts on the worker's text, changes a card, repairs anything or bypasses permissions.
-
-When worker messages are unavailable, follow reports that once per run/watcher and uses the card log; a heartbeat never counts.
-A growing/changed log prevents a possibly-wedged warning. Only two consecutive same-run running calls with no log
-movement can be flagged; first observations, run changes and unreadable signals do not count. With messages, two quiet calls flag.
-
-Use `python3 <plugin-root>/scripts/route.py --class app-code` to inspect the optional
-routing table. It returns worker and different-family verifier JSON; it never files
-or dispatches a card. Edit user routes to name your own profiles and model families.
-
-## Human-ask convention
-
-For `hermes-kanban-live needs`, start a comment line with `ASK OPERATOR:` followed by the
-question. A mention in prose such as "no ASK OPERATOR yet" is not an ask. Block or
-dependency-wait reasons must say `waiting on operator`, `waiting for operator` or
-`needs operator` to match a current human wait. These are explicit text conventions,
-not natural-language intent detection. Needs you workflow rows separately flag
-blocked/review results and cards that are ready but not starting.
-
-### Report a wave's actual runs and elapsed time
-
-Run `hermes-kanban-live report --board demo`, optionally repeating `--task T` or
-adding `--since EPOCH`. Without task ids this includes all statuses, including
-done/archived. `--since` selects card creation time; it intersects task selection
-and does not clip individual runs. JSON has one object per card in `cards`, plus
-`totals`, `read_status`, `now` and `missing`. Each card contains id/title/status,
-assignee, actual last-run `model_used`, `provider_used`, `fallback_from`, `runs`,
-`retried`, `duration_s` and last-run warning counts. Unknown run data stays null.
-
-`totals.by_status` counts cards; `run_seconds` sums all known run durations of
-selected cards (running runs measured at `now`); `fell_back` counts cards that
-fell back on any attempt; `retried` counts cards with the conservative retry
-guard (multiple runs or a retry/block-history event). These are elapsed seconds,
-not billed token/currency costs. Add `--format text` for aligned plain-text
-columns and totals, without Markdown. Exit 4 reports absent explicit ids; exit 5
-is an unreadable board. A card merely excluded by `--since` is not missing.
-
-### Check actual worker/verifier family independence
-
-Run `hermes-kanban-live verify-pair --board demo --worker T --verifier V`, with
-optional `--families FILE`. It uses each card's newest finished run (non-null
-`ended_at`, newest run id), not a model pin or a newer unfinished attempt. JSON
-includes each actual `model_used`, `provider_used`, `run_id`, mapped `family` and
-`different_families`. The run's actual provider maps to its model family through
-`providers` in the routes file. Keep same-family hosts mapped alike; multi-family
-hosts need family-specific identifiers. This does not infer family from a model
-prefix or prove that review work happened.
-
-Lookup order matches `route.py`: explicit `--families`, `KANBAN_WATCH_ROUTES`,
-`~/.config/hermes-kanban-watch/routes.yaml`, shipped template. Only the valid,
-non-empty `providers` map is needed. Exit 0 means different families, 1 means
-same family or invalid/unknown classification, 3 means no finished run for either
-id, and 5 means unreadable board. Classification errors set `different_families`
-to null and include `error`; never convert UNKNOWN to a successful check.
-For direct Claude Code calls request only `Bash(hermes-kanban-live report:*)` and
-`Bash(hermes-kanban-live verify-pair:*)`, not unrestricted Bash permission.
-
-### Keep a parent-question watch armed across timeouts
-
-Run `hermes-kanban-live needs --board demo --loop --created-by PARENT --cursor-key WAVE`
-once, rather than rebuilding a command after each exit 3. In loop mode `--since`
-is optional, captured once at startup when absent, and never advances across
-timeout windows. Its first poll includes pre-existing waits still in force,
-including a creator's older parent question. Answered/resumed/superseded old
-waits stay excluded and existing seen-cursor deduplication still applies.
-
-Loop mode sleeps at `--interval` and retries only normal timeouts, with no timeout
-JSON churn. It exits 0 on the first non-empty items result, or fails on an error
-without retrying it. `--max-seconds` bounds each window, not the command's lifetime;
-cancel the caller to stop a quiet watch. Without `--loop`, the required `--since`,
-exit-3 timeout and output behaviour are unchanged. This is still a reader, never
-permission to answer, dispatch or mutate a card.
-
-## Feature guides
-
-- [Wave time and actual-run report](../../docs/wave-report.md): Actual runs, retries and elapsed seconds, not billed costs.
-- [Verify the families that actually ran](../../docs/verify-pair.md): Finished-run family evidence, not model pins.
-- [Arm needs once with its own timeout loop](../../docs/needs-loop.md): Read-only parent-question waits across timeouts.
-- [Print a head-pinned PR merge receipt](../../docs/pr-merge-receipt.md): Independent-verifier, exact-head, CI and merge-state checks; never merges.
-- [Watcher token cost](../../docs/watcher-token-cost.md): Counts-only Claude watcher usage, separate from worker time.
-- [Duplicate workers and questions parked on the parent](../../docs/duplicate-workers-parent-questions.md): Observe process warnings and parent waits; never repair them.
-- [File a fix and re-verify an earlier verdict](../../docs/fix-and-reverify.md): Explicit authoring only; reuse verifier pins, optional parent note, no dispatch.
-- [Workflow-owned wait rounds](../../docs/workflow-wait-rounds.md): Healthy read-only waits under one deadline.
-- [Suggest standing answers without posting](../../docs/standing-answers.md): Print proposals for authorised review, never post.
+- [Wave time and actual-run report](../../docs/wave-report.md): Actual runs and elapsed time.
+- [Verify the families that actually ran](../../docs/verify-pair.md): Finished-run family evidence.
+- [Arm needs once with its own timeout loop](../../docs/needs-loop.md): Legacy read-only parent waits.
+- [Print a head-pinned PR merge receipt](../../docs/pr-merge-receipt.md): Receipt only, never merges.
+- [Watcher token cost](../../docs/watcher-token-cost.md): Legacy Claude watcher usage.
+- [Duplicate workers and questions parked on the parent](../../docs/duplicate-workers-parent-questions.md): Observe, never repair.
+- [File a fix and re-verify an earlier verdict](../../docs/fix-and-reverify.md): Explicit authoring, not a watcher action.
+- [Workflow-owned wait rounds](../../docs/workflow-wait-rounds.md): Explicit legacy Workflow only.
+- [Suggest standing answers without posting](../../docs/standing-answers.md): Proposals, never posts.

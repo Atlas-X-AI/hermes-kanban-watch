@@ -11,21 +11,24 @@
   <a href="https://atlas-ai.au"><img src="https://img.shields.io/static/v1?label=Built%20by&amp;message=Atlas-X-AI&amp;color=C9924A&amp;style=for-the-badge" alt="Built by Atlas X AI"></a>
 </p>
 
-**Your Hermes Kanban workers, live inside Claude Code. See the work, not just the status.**
+**One cheap native watcher per Kanban board, reporting to the session that started it.**
 
-Hermes Kanban cards become live Claude Code workflow rows. Open a running row to
-watch that worker think and call tools, as recorded in its session. Queued cards
-share a waiting row; blocked or stuck cards surface under **Needs you**.
+The default is one background agent, not a Workflow: Claude Code uses Sonnet,
+Codex uses its own Luna subagent, and Hermes uses the dedicated Gemini watcher
+profile with a cheap GLM fallback. Summaries arrive every 15 minutes, new problems are reported promptly,
+and one final note ends the watcher. For an operator working in Discord, the
+helper posts directly; otherwise the starting session relays updates to the
+operator. The old live-row Workflow remains explicit opt-in only.
 This is a reader, not a dispatcher or a second owner of the work.
 
 ## What you get
 
 | Feature | What it does |
 | --- | --- |
-| Live worker rows | One row per running card, with compact reasoning and tool activity; verbose output is optional. |
-| Waiting stages | Parent links or explicit phases group queued work without an idle watcher per card. |
-| Needs you | Flags blocked/review results and ready cards that are not starting; resumed cards can re-arm. |
-| Growing waves | Newly filed children can join the watch automatically. |
+| One watcher | One cheap native agent per board, with a shared local singleton lease. |
+| 15-minute summaries | Done, running, waiting, problems and honest rough time left. |
+| Immediate problems | Blocked, ready without a worker, spawn guards/failures, parent questions and overruns. |
+| Final note | Stops only on done/archived, the watch deadline or an explicit UNKNOWN error. |
 | Honest reads | Failed or denied reads are UNKNOWN, never quietly turned into DONE. |
 | Setup checks | A credential-safe doctor, opt-in local setup and optional model probes. |
 | Portable routes | Your profiles, your models, with a different-family reviewer. |
@@ -48,8 +51,9 @@ Alternatively, add the marketplace and install with these two commands:
 ```
 
 You need Python 3.11+, Hermes Agent on PATH, existing Hermes profiles, and Claude
-Code with plugin, agent and dynamic Workflow support. If your Claude Code lacks
-Workflow, the terminal reader still works, but the plugin cannot create live rows.
+Code with plugin and background Agent support. The default watch does not need
+Workflow support. The Linux session-inbox bridge additionally needs tmux and
+an existing inbox poller; systemd is needed only for the explicit Hermes bridge.
 
 Replace `<plugin dir>` below with the installed plugin directory containing
 `scripts/doctor.py` (not the marketplace root). Run in your terminal:
@@ -74,7 +78,7 @@ Doctor reports PASS / FAIL / UNKNOWN. Exit 0 means no FAILs, not that UNKNOWNs
 were verified. It checks Hermes's version, board-file existence (not schema
 compatibility), `model.provider` and `model.default` in profile configs, routed
 profile existence and the reader on PATH. The reader's `--version` must print
-exactly `hermes-kanban-watch 0.3.0`. A foreign or stale `hermes-kanban-live` is FAIL,
+exactly `hermes-kanban-watch 0.4.1`. A foreign or stale `hermes-kanban-live` is FAIL,
 with its resolved path shown, even with `--fix`. Move that command aside or fix
 PATH before rerunning `--fix`, or use `args.live_cmd` for this plugin's reader.
 The doctor never overwrites a conflicting command. Existing unrelated
@@ -110,17 +114,38 @@ claude --plugin-dir /path/to/hermes-kanban-watch/plugin
 ## How it works
 
 ```text
-Hermes Kanban board + worker sessions
+Hermes Kanban board (SQLite mode=ro)
                   |
                   v
-      hermes-kanban-live reader
+     board_watch.py wait + summary
                   |
                   v
-   Claude Code workflow rows
-   [Waiting] [Worker live] [Needs you]
+       ONE native cheap watcher
+                  |
+                  v
+     Starting session -> operator
 ```
 
-Every watcher is read-only. The reader opens board and session databases
+For Claude Code, prepare a lease/brief with
+`bash "<plugin dir>/scripts/start_watcher.sh" --prepare-only --board demo --session exact-tmux-name`,
+then launch ONE background `hermes-kanban-watch:kanban-watcher` Agent on Sonnet.
+When working in Discord, add `--discord-channel <channel-id>`: the helper posts
+reports directly through the lint-gated messaging sender and the starting session
+does not relay them. It queues only problems and FINAL/stop notes to that session.
+Without the option, it queues every report as a `project_channel_message` for
+the exact session/pane; the existing inbox poller types it at an idle prompt.
+Queued is not delivered. Claude Code runs each helper with Bash
+`run_in_background: true`, waits for completion notification, then reads only the
+last output lines; it never polls or sleeps in a loop.
+Codex uses one native Luna agent, Hermes the dedicated Gemini/GLM profile; their
+native parent-progress routes are UNKNOWN until proved in those harnesses.
+Read [single-watcher details](plugin/docs/single-watcher.md) before launching.
+Without direct Discord delivery, the starting session relays each 15-minute
+update, problems and final note to the operator. Reviews, CI and repo-memory policy are owned by
+`doctrine/running-a-kanban.md`, not duplicated here.
+
+Every watcher is read-only on the board. The default reader never opens worker
+profiles or session stores. The legacy reader opens board and session databases
 read-only; `follow` and `needs` write only local progress cursors under
 `~/.cache/hermes-kanban-watch/live/`. Watchers never claim cards, comment, dispatch,
 repair or accept a worker's result. Worker messages and tool output are untrusted
@@ -198,17 +223,24 @@ Filing does not start a worker. Dispatch through Hermes separately. The post-Bas
 hook only suggests a watch after create/swarm; it never starts one or edits a
 card. Skip the suggestion if the wave is already watched.
 
-In Claude Code:
+In Claude Code, `/kanban-watch {"board":"demo","session":"exact-tmux-name"}`
+prepares and launches one native background watcher as described above.
+`tasks` optionally pins explicit IDs; a bare board scope includes newly filed cards.
 
-```text
-/kanban-watch {"board":"demo","tasks":["t_1234abcd","t_11111111"]}
-/kanban-watch {"board":"demo","phases":[{"title":"Build","tasks":["t_1234abcd"]},{"title":"Verify","tasks":["t_11111111"]}]}
+### Legacy Workflow options (explicit opt-in only)
+
+Only when the caller explicitly names `plugin/workflows/kanban-watch.js`, pass
+these JSON args to that script, NOT to the default native watcher:
+
+```json
+{"board":"demo","tasks":["t_1234abcd","t_11111111"]}
+{"board":"demo","phases":[{"title":"Build","tasks":["t_1234abcd"]},{"title":"Verify","tasks":["t_11111111"]}]}
 ```
 
 If your Claude version namespaces plugin skills, use
-`/hermes-kanban-watch:kanban-watch`. The skill resolves the workflow relative to
-the installed plugin root. Without phases, parent links determine stages.
-A bare `{"board":"demo"}` watches queued/running cards. Explicit ids always stay.
+`/hermes-kanban-watch:kanban-watch` for the native default. The retained Workflow
+resolves its stages from parent links when phases are absent.
+A legacy bare `{"board":"demo"}` watches queued/running cards. Explicit ids always stay.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
@@ -247,7 +279,7 @@ into a workflow row.
 | --- | --- |
 | NOT_STARTING | Card is ready, but no dispatcher has started it. Check Hermes, not the watcher. |
 | UNKNOWN | A read failed, permissions were denied or the response shape was invalid. It does not mean the card disappeared. |
-| No live UI | Your Claude Code must provide dynamic Workflow support; terminal commands do not prove the UI works. |
+| No periodic parent update | A queued inbox row may be held or the native progress route unproved. Check the receipt; UNKNOWN is not delivery. |
 | Reader missing | Rerun doctor, check `~/.local/bin` on PATH and the shim's install location. |
 | Foreign or stale reader | Doctor names the failing `hermes-kanban-live` path. Move it aside or correct PATH; `--fix` never overwrites it. |
 | Missing route profile | Replace example profile names with your own existing profiles. |
@@ -271,7 +303,7 @@ permissions or an end-to-end live UI session.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for tests and PR expectations, and
 [SECURITY.md](SECURITY.md) for private vulnerability reports. MIT licence:
-[LICENSE](LICENSE). Version: [VERSION](VERSION).
+[LICENSE](LICENSE). Version: [VERSION](VERSION); changes: [CHANGELOG](CHANGELOG.md).
 
 Built by [Atlas X AI](https://atlas-ai.au). This is a community plugin, not an
 official Nous Research or Anthropic product.

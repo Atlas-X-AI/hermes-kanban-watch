@@ -1,7 +1,7 @@
 {
   "name": "hermes-kanban-watch",
-  "version": "0.3.0",
-  "description": "Read-only Hermes Kanban cards as live Claude Code workflow rows, with portable routing and setup checks.",
+  "version": "0.4.1",
+  "description": "One read-only native watcher per Kanban board, with 15-minute summaries and immediate problem alerts.",
   "author": {
     "name": "Atlas X AI",
     "url": "https://atlas-ai.au"

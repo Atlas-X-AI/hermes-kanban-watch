@@ -1,12 +1,15 @@
-# hermes-kanban-watch 0.3.0
+# hermes-kanban-watch 0.4.1
 
 For marketplace installation, setup and the complete guide, see the
 [repository README](https://github.com/Atlas-X-AI/hermes-kanban-watch#readme).
 
-A Claude Code plugin that shows Hermes Kanban cards as live workflow rows. One
-row follows each running worker, queued cards share a waiting row per stage, and
-blocked, review or otherwise unfinished results appear under Needs you. Newly
-filed children can join the watch; blocked/review cards can resume and re-arm.
+A plugin that starts ONE cheap native watcher for a Kanban board, not a Workflow.
+Claude Code uses a background Sonnet Agent, Codex its own Luna subagent, and Hermes
+a dedicated Gemini watcher profile with cheap GLM fallback. Every 15 minutes it reports done, running,
+waiting, problems and rough time left. New problems wake it promptly; one final
+note ends the watcher. The helper posts directly when a Discord channel is
+configured; otherwise the parent relays updates to the operator.
+Native Codex/Hermes progress delivery is UNKNOWN until exercised there.
 The watch path is a reader, not a dispatcher or a second owner of the work.
 The separate, explicitly invoked `file_card.py` command can create a routed card.
 
@@ -26,9 +29,9 @@ availability, installed Claude Code permissions or an end-to-end live UI session
 - Python 3.11 or newer, no third-party Python dependencies for the plugin.
 - Hermes Agent on PATH and a board with the supported SQLite schema.
 - Existing Hermes profiles with your own models and credentials configured.
-- Claude Code with plugin, agent and dynamic Workflow support. If Workflow is
-  unavailable in your version, the reader still works in the terminal, but this
-  plugin cannot invent a live workflow UI.
+- Claude Code with plugin and background Agent support for the default route.
+- tmux and an existing Claude inbox poller for the session-inbox bridge.
+- Linux user systemd only for the explicit Hermes-to-Claude bridge launcher.
 - Node.js and pytest only to run the development tests.
 
 ## Install
@@ -45,11 +48,19 @@ From a checkout, load the plugin in Claude Code:
 claude --plugin-dir /path/to/hermes-kanban-watch/plugin
 ```
 
-The plugin manifest, skill, watcher agent, workflow and hook are shipped together.
-No changes to global Claude settings or private agent files are needed. Invoke
-`/kanban-watch` (or the namespaced `/hermes-kanban-watch:kanban-watch` if your
-Claude version namespaces plugin skills). The skill resolves the installed
-workflow file relative to the plugin root and calls Workflow with that path.
+The plugin manifest, skill, native watcher agent, legacy Workflow and hook ship
+together. No global Claude settings or private agent edits are needed. Invoke
+`/kanban-watch` (or `/hermes-kanban-watch:kanban-watch`) after filing each run.
+For Claude, the skill prepares a brief and local board lease with
+`start_watcher.sh --prepare-only --board demo --session exact-tmux-name`, then
+starts ONE background native Sonnet Agent. Do not also start the Hermes bridge.
+When the operator works in Discord, add `--discord-channel <channel-id>`:
+the helper posts directly, the starting session receives only problems and
+FINAL/stop notes, and neither session relays already-posted reports. Otherwise
+the original inbox/parent relay is unchanged. Claude Code uses background Bash
+completion notifications for each 900-second helper wait, never polling.
+See [single-watcher details](docs/single-watcher.md) for reader/delivery commands,
+native routes, singleton behaviour and the operator-run proof.
 
 Set `HERMES_HOME` if your board data is not under `~/.hermes`. The default board
 is `HERMES_HOME/kanban.db`; named boards are
@@ -66,7 +77,7 @@ Doctor prints PASS / FAIL / UNKNOWN for each check and a summary. Exit 0 means n
 FAILs, not that UNKNOWNs were verified. Without flags, it only checks Hermes's
 version, the board file, the two model keys in each profile config, route profile
 existence and `hermes-kanban-live` on PATH. Its `--version` must print exactly
-`hermes-kanban-watch 0.3.0`. A foreign or stale command is FAIL with its resolved
+`hermes-kanban-watch 0.4.1`. A foreign or stale command is FAIL with its resolved
 path shown; move it aside or correct PATH, then rerun `--fix`, or set `args.live_cmd`
 to this plugin's reader. Existing unrelated `kanban-live` commands are not used
 or changed. It never opens `.env`, `auth.json`, sessions
@@ -193,11 +204,14 @@ Paste the emitted `/kanban-watch` command in Claude Code to start watching. Fili
 is separate from the watcher's read-only permissions; do not grant a watcher create
 or set-model access.
 
-In Claude Code, provide JSON args to the skill:
+## Legacy Workflow (explicit opt-in only)
+
+Only when the caller names `workflows/kanban-watch.js`, pass JSON args to that
+script. `/kanban-watch` now uses the native-agent path above, not these rows:
 
 ```text
-/kanban-watch {"board":"demo","tasks":["t_1234abcd","t_11111111"]}
-/kanban-watch {"board":"demo","phases":[{"title":"Build","tasks":["t_1234abcd"]},{"title":"Verify","tasks":["t_11111111"]}]}
+{"board":"demo","tasks":["t_1234abcd","t_11111111"]}
+{"board":"demo","phases":[{"title":"Build","tasks":["t_1234abcd"]},{"title":"Verify","tasks":["t_11111111"]}]}
 ```
 
 Without phases, parent links determine stages. Bare `{ "board": "demo" }` watches
@@ -303,6 +317,7 @@ configuration shapes are UNKNOWN and never repaired automatically.
 - [File a fix and re-verify an earlier verdict](docs/fix-and-reverify.md): Explicitly file a fix or different-family re-verification from a finished verdict.
 - [Workflow-owned wait rounds](docs/workflow-wait-rounds.md): Continue healthy read-only waits across bounded rounds and a shared deadline.
 - [Suggest standing answers without posting](docs/standing-answers.md): Validate answer rules and print proposals for authorised review, never post them.
+- [One watcher per board](docs/single-watcher.md): Native launch, deterministic 15-minute summaries and exact-session delivery.
 
 ## Development checks
 
