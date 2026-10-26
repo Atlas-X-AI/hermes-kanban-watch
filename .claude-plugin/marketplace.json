@@ -9,7 +9,7 @@
     {
       "name": "hermes-kanban-watch",
       "source": "./plugin",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "homepage": "https://github.com/Atlas-X-AI/hermes-kanban-watch",
       "repository": "https://github.com/Atlas-X-AI/hermes-kanban-watch",
       "description": "Watch a Kanban board with one native agent, never a workflow by default."

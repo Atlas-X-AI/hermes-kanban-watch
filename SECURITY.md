@@ -18,7 +18,11 @@ cursors and pending receipts are local state, not board mutations.
 `notify_session.py` may insert one explicit exact-session inbox row and reads it
 back; this is its only external write. It never types directly into tmux and
 refuses missing/ambiguous session targets. Native parent stdout is not proven
-delivery. The legacy reader's `follow` and `needs` save only local progress
+delivery. With `--discord-channel`, `watcher_tick.py` additionally delegates
+bounded, counts-only reports to the existing lint-gated/read-back messaging
+sender. No card text enters the Discord draft. Sender failure, timeout or absent
+verified receipt is UNKNOWN; tests inject a fake executable and never post.
+The legacy reader's `follow` and `needs` save only local progress
 cursors under `~/.cache/hermes-kanban-watch/live/`.
 
 The plugin never reads `.env`, `auth.json` or other credential files and holds no
@@ -31,7 +35,7 @@ missing default board with `hermes kanban --board default init` or a missing
 named board with `hermes kanban boards create <slug>`, plus user routes and a
 local `hermes-kanban-live` reader shim, without overwriting existing files.
 Doctor checks the resolved command's `--version` against the installed plugin
-identity (`hermes-kanban-watch 0.4.0`), not merely its presence on PATH. Foreign
+identity (`hermes-kanban-watch 0.4.1`), not merely its presence on PATH. Foreign
 or stale commands fail with their path shown; their output is omitted and
 `--fix` never replaces them. This identity check is not a cryptographic trust
 check: only execute commands from trusted PATH directories.

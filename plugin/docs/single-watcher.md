@@ -1,9 +1,11 @@
 # One watcher per board
 
 The default watch is one cheap native background agent, not the retained
-`workflows/kanban-watch.js`. The starting session launches it right after filing
-and relays every 15-minute summary, immediate problem note and final note to the
-operator in their current channel. The watcher never messages a human directly.
+`workflows/kanban-watch.js`. The starting session launches it right after filing.
+When the operator works in Discord, configure `--discord-channel`: the deterministic
+helper posts reports directly and the starting session does not relay them. Without
+it, the starting session relays summaries, immediate problems and the final note.
+The watcher agent never composes or sends a human message itself.
 
 ## Choose the starting harness, not a second model host
 
@@ -23,16 +25,18 @@ native watcher. One local lease is shared across these launch paths.
 From the installed plugin root, for Claude Code:
 
 ```sh
-bash scripts/start_watcher.sh --prepare-only --board demo --session exact-tmux-name --every 900 --max-hours 12
+bash scripts/start_watcher.sh --prepare-only --board demo --session exact-tmux-name --discord-channel <channel-id> --every 900 --max-hours 12
 ```
 
+Omit `--discord-channel` for the unchanged inbox-only parent relay.
 The JSON receipt names `brief`, `config` and the exact helper `command`. Give the
 brief to ONE background Sonnet Agent of type `hermes-kanban-watch:kanban-watcher`.
-This preparation starts no agent. The brief commands `watcher_tick.py --config`
-once per wake, in the foreground, with a timeout large enough for the wait. Use
-the tool's documented timeout units; a tool that cannot await that interval needs
-its own supported asynchronous wait, not faster model polling. Such a route is
-UNKNOWN until exercised, not silently shortened below the required cadence.
+This preparation starts no agent. For Claude Code, run `watcher_tick.py --config`
+with Bash `run_in_background: true`, wait for its task-completion notification,
+then read only the last lines of that command's output for CONTINUE or STOP.
+Never poll the background command and never sleep in a loop. The synchronous
+Bash limit cannot cover 900 seconds; do not shorten the helper interval to fit it.
+The Hermes bridge keeps its own foreground terminal-timeout instructions.
 
 For Codex or Hermes native reporting:
 
@@ -101,6 +105,44 @@ Missing cards, unreadable/schema-invalid databases and invalid scopes fail
 closed with non-zero/UNKNOWN, never a final note. SQLite uses mode=ro/query_only.
 The reader does not invoke any board-mutation CLI.
 
+## Direct Discord reports
+
+`--discord-channel <id>` is the default for a Claude Code operator working in
+Discord. It requires `--session` for the exact starting session, validates a
+numeric channel ID, and stores `discord_channel` in the watcher config. The helper
+calls `~/.claude/skills/messaging-hayden/bin/send-hayden.sh <draft> --channel <id>`
+once for each summary, problem and FINAL. It also reports read UNKNOWN and the
+time-limit stop without claiming completion. No model formats or sends a report.
+
+Drafts contain at most eight lines: done, running, waiting, problems, rough time
+left and next-step context, each with one state marker. The final line is
+`-# Source: <starting-session>`. Only counts and fixed prose enter the draft;
+card titles, problem text, board names, paths, SHAs and branches are never copied.
+The local plain-text summary still gives the parent the diagnostic detail.
+
+The wrapper must lint, send and read the message back. Any non-zero exit,
+missing final `ok <id> reactions=0/0` receipt, timeout or missing sender is
+`delivery UNKNOWN`, never success. Its own live source-identity check must
+succeed in the starting pane; a detached process without that identity cannot
+claim delivery. There is no DM fallback or source-identity bypass.
+
+With Discord enabled, `notify_session.py` queues only problem and FINAL/stop
+notes, including UNKNOWN and time-limit stops, not routine summaries. Neither
+parent nor watcher relays already-posted reports. Without the option, all
+existing inbox/native relay behaviour is unchanged.
+
+A failed send keeps the pending event and lease for parent investigation. Use the
+same config for an explicitly authorised retry; UNKNOWN may mean sent but not
+verified, so check before retrying. A verified send receipt is saved before the
+inbox write so an inbox-only retry does not repost to Discord. A process killed
+between sending and recording that receipt still has an uncertain outcome.
+
+Tests inject `KANBAN_WATCH_DISCORD_SENDER` with an absolute fake executable; it is
+never set from card text. They exercise its `--lint-only` mode without a real
+send. Set `KANBAN_WATCH_FORMAT_LINT_DIR` to a checkout of `astra-context-layer`
+to also run its real `format-lint --check --text-file` on each fake-send draft.
+No real Discord or live inbox is used by tests.
+
 ## Delivery and local state
 
 ```sh
@@ -129,7 +171,8 @@ again before delivery, so a superseded watcher cannot send into a newer run.
 
 Read `doctrine/running-a-kanban.md` for reviews last, end-of-run CI (large-change
 exception), the review lane and repo memory after every run. The starting session
-owns that policy and the human relay; this feature never creates review cards,
+owns that policy. The helper owns configured Discord reports; without that
+option the starting session owns the human relay. This feature never creates review cards,
 runs CI, merges, updates memory or dispatches work. The note is a separate change;
 if not yet available, its load is UNKNOWN.
 

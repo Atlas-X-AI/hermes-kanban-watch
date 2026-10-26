@@ -16,7 +16,8 @@
 The default is one background agent, not a Workflow: Claude Code uses Sonnet,
 Codex uses its own Luna subagent, and Hermes uses the dedicated Gemini watcher
 profile with a cheap GLM fallback. Summaries arrive every 15 minutes, new problems are reported promptly,
-and one final note ends the watcher. The starting session relays updates to the
+and one final note ends the watcher. For an operator working in Discord, the
+helper posts directly; otherwise the starting session relays updates to the
 operator. The old live-row Workflow remains explicit opt-in only.
 This is a reader, not a dispatcher or a second owner of the work.
 
@@ -77,7 +78,7 @@ Doctor reports PASS / FAIL / UNKNOWN. Exit 0 means no FAILs, not that UNKNOWNs
 were verified. It checks Hermes's version, board-file existence (not schema
 compatibility), `model.provider` and `model.default` in profile configs, routed
 profile existence and the reader on PATH. The reader's `--version` must print
-exactly `hermes-kanban-watch 0.4.0`. A foreign or stale `hermes-kanban-live` is FAIL,
+exactly `hermes-kanban-watch 0.4.1`. A foreign or stale `hermes-kanban-live` is FAIL,
 with its resolved path shown, even with `--fix`. Move that command aside or fix
 PATH before rerunning `--fix`, or use `args.live_cmd` for this plugin's reader.
 The doctor never overwrites a conflicting command. Existing unrelated
@@ -128,13 +129,19 @@ Hermes Kanban board (SQLite mode=ro)
 For Claude Code, prepare a lease/brief with
 `bash "<plugin dir>/scripts/start_watcher.sh" --prepare-only --board demo --session exact-tmux-name`,
 then launch ONE background `hermes-kanban-watch:kanban-watcher` Agent on Sonnet.
-The helper queues a `project_channel_message` for the exact session/pane; the
-existing inbox poller types it at an idle prompt. Queued is not delivered.
+When working in Discord, add `--discord-channel <channel-id>`: the helper posts
+reports directly through the lint-gated messaging sender and the starting session
+does not relay them. It queues only problems and FINAL/stop notes to that session.
+Without the option, it queues every report as a `project_channel_message` for
+the exact session/pane; the existing inbox poller types it at an idle prompt.
+Queued is not delivered. Claude Code runs each helper with Bash
+`run_in_background: true`, waits for completion notification, then reads only the
+last output lines; it never polls or sleeps in a loop.
 Codex uses one native Luna agent, Hermes the dedicated Gemini/GLM profile; their
 native parent-progress routes are UNKNOWN until proved in those harnesses.
 Read [single-watcher details](plugin/docs/single-watcher.md) before launching.
-The starting session relays each 15-minute update, problems and final note to
-the operator. Reviews, CI and repo-memory policy are owned by
+Without direct Discord delivery, the starting session relays each 15-minute
+update, problems and final note to the operator. Reviews, CI and repo-memory policy are owned by
 `doctrine/running-a-kanban.md`, not duplicated here.
 
 Every watcher is read-only on the board. The default reader never opens worker

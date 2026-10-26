@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.1
+
+- Use Claude Code background Bash waits with completion notifications, not a
+  synchronous 960-second wait. Keep the 900-second cadence and Hermes timeout.
+- Isolate all four XDG roots per test, including inherited XDG_STATE_HOME leases.
+- Add optional `--discord-channel` direct helper reports through the lint-gated,
+  read-back-verified messaging sender. Render at most eight safe state-marked
+  lines with the starting-session source footer; never copy card text to Discord.
+- In Discord mode, queue only problems and final/stop notes to the starting
+  session, not routine summaries. Sender failures remain UNKNOWN and pending;
+  preserve a verified send receipt across an inbox retry to avoid reposting.
+- Document direct helper delivery as the default for operators working in Discord.
+  Tests use an injected fake sender and disposable boards/inboxes only.
+
 ## 0.4.0
 
 - Replace the default multi-row Workflow with ONE cheap native watcher per board:

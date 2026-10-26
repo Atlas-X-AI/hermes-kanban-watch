@@ -195,7 +195,7 @@ def test_feature_docs_known_red_unlinked_file(tmp_path):
 
 def test_public_contract_metadata_agent_skill_hooks():
     manifest = json.loads((PLUGIN / ".claude-plugin/plugin.json").read_text())
-    assert manifest["name"] == "hermes-kanban-watch" and manifest["version"] == "0.4.0"
+    assert manifest["name"] == "hermes-kanban-watch" and manifest["version"] == "0.4.1"
     assert manifest["author"]["name"] and manifest["description"]
     hook = json.loads((PLUGIN / "hooks/hooks.json").read_text())["hooks"]["PostToolUse"][0]
     assert hook["matcher"] == "Bash"
@@ -280,10 +280,21 @@ def test_no_private_paths():
     ci = re.compile(rb'(?<![A-Za-z0-9_./-])' + re.escape(
         b'Atlas-X-AI/.github/.github/workflows/atlas-ci.yml@main') + rb'(?![A-Za-z0-9_./@-])')
     ci_paths = {".github/workflows/ci.yml", "README.md", "CONTRIBUTING.md"}
+    # Commissioned integration names, not private machine paths or arbitrary prose.
+    sender_path = b'.claude/skills/messaging-hayden/bin/send-hayden.sh'
+    integration_tokens = {
+        "plugin/scripts/watcher_tick.py": (sender_path,),
+        "plugin/skills/kanban-watch/SKILL.md": (sender_path, b'messaging-hayden'),
+        "plugin/docs/single-watcher.md": (sender_path, b'astra-context-layer'),
+        "tests/test_watcher_discord.py": (b'send-hayden.sh', b'astra_context_layer'),
+    }
 
     def private(content, path=""):
         if path in ci_paths:
             content = ci.sub(b"PUBLIC_WORKFLOW", content)
+        for token in integration_tokens.get(path, ()):
+            exact = rb'(?<![A-Za-z0-9_.-])' + re.escape(token) + rb'(?![A-Za-z0-9_.-])'
+            content = re.sub(exact, b"PUBLIC_INTEGRATION", content)
         return banned.search(public.sub(b"PUBLIC", content))
 
     assert private(b"/home/example")  # Positive controls for the exact scanner.
@@ -296,6 +307,12 @@ def test_no_private_paths():
         assert not private(workflow, path)
         assert private(workflow + b"-private", path)
         assert private(workflow.replace(b"atlas-ci", b"atlas-private"), path)
+    for path, tokens in integration_tokens.items():
+        for token in tokens:
+            assert not private(token, path)
+            assert private(token, "README.md")  # The name is not allowed estate-wide.
+            assert private(token + b"-private", path)
+            assert private(b"/home/example/" + token, path)
     this_test = Path(__file__).resolve()
     paths = [p for p in ROOT.iterdir() if p.is_file() and p.name not in {"SPEC.md", ".git"}]
     for directory in (PLUGIN, ROOT / "tests", ROOT / "assets", ROOT / ".github", ROOT / ".claude-plugin"):

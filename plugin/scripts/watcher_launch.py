@@ -44,6 +44,12 @@ def launch(args):
     validate_scope(args.board, args.cards)
     every, hours = positive(args.every), positive(args.max_hours)
     delivery = args.delivery or ("inbox" if args.session else "native")
+    if args.discord_channel is not None:
+        if not re.fullmatch(r"[0-9]{1,20}", args.discord_channel):
+            raise ValueError("--discord-channel must be a numeric channel ID")
+        if not args.session or not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", args.session):
+            raise ValueError("--discord-channel requires --session with the exact starting session name")
+        resolve_pane(args.session)
     if delivery == "inbox":
         if not args.session:
             raise ValueError("--session is required for inbox delivery")
@@ -67,6 +73,7 @@ def launch(args):
     seconds = hours * 3600
     config = {"board": args.board, "cards": args.cards, "board_home": str(board_home), "every": every,
               "until": time.time() + seconds, "session": args.session, "delivery": delivery, "launch_id": launch_id,
+              "discord_channel": args.discord_channel,
               "cursor": str(directory / "cursor.json"), "relay_state": str(directory / "relay.json"),
               "lease": str(root / "leases" / f"{args.board}.json")}
     config_path = directory / "config.json"
@@ -76,8 +83,15 @@ def launch(args):
     tool_timeout = math.ceil(min(every, seconds)) + 60
     if tool_timeout > 7100:
         raise ValueError("--every is too long for a foreground tool call (maximum 7040 seconds)")
+    delivery_instructions = (
+        "The helper posts directly to the configured Discord channel; the starting session does not relay reports. "
+        "Only problem and FINAL notes (including UNKNOWN/time-limit stops) go to its inbox; never relay routine summaries."
+        if args.discord_channel else
+        "It queues the inbox row when delivery=inbox; the starting session relays each summary to the operator. "
+        "When delivery=native it prints the summary for YOU to relay to your native parent.")
     brief = Template((PLUGIN / "templates/watcher-brief.md").read_text()).substitute(
-        board=args.board, command=command, timeout=tool_timeout, every=every, until=config["until"])
+        board=args.board, command=command, timeout=tool_timeout, every=every, until=config["until"],
+        delivery_instructions=delivery_instructions)
     brief_path = directory / "brief.md"
     brief_path.write_text(brief, encoding="utf-8")
     reserve(config)
@@ -109,6 +123,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--board", required=True)
     parser.add_argument("--session", help="Exact starting Claude tmux session; implies inbox delivery")
+    parser.add_argument("--discord-channel", help="Post reports directly to this Discord channel; requires --session")
     parser.add_argument("--cards", nargs="+", action="extend")
     parser.add_argument("--every", type=float, default=900)
     parser.add_argument("--max-hours", type=float, default=12)

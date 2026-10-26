@@ -8,7 +8,9 @@ description: Use when starting a Kanban run or asking for a dynamic workflow.
 Start ONE cheap native watcher per board immediately after filing a Kanban run.
 A request for a "dynamic workflow" means a Kanban by default, unless the caller
 explicitly names a Workflow script. Do not start a Workflow or a watcher per card.
-The watcher reads the board; the starting session owns the work and the human relay.
+The watcher reads the board; the starting session owns the work. When the operator
+works in Discord, the helper posts reports directly; the starting session does
+not relay them. Without a Discord channel, the starting session owns the human relay.
 
 ## Prepare once, launch in the starting harness
 
@@ -23,15 +25,25 @@ Claude parent, resolve it in the PARENT pane with
 For a Claude Code parent:
 
 ```sh
-bash <plugin-root>/scripts/start_watcher.sh --prepare-only --board demo --session <exact-tmux-name> --every 900 --max-hours 12
+bash <plugin-root>/scripts/start_watcher.sh --prepare-only --board demo --session <exact-tmux-name> --discord-channel <channel-id> --every 900 --max-hours 12
 ```
+
+For an operator working in Discord, this is the default: supply their current
+session channel ID. The helper posts summaries, problems and FINAL directly with
+`~/.claude/skills/messaging-hayden/bin/send-hayden.sh`; no model formats or sends
+those reports. The starting session receives only problem and FINAL/stop notes
+via `notify_session.py`, never routine summaries, and does not relay reports.
+Omit `--discord-channel` when not working in Discord; all inbox/relay behaviour
+then stays unchanged. The exact starting session supplies the source footer.
 
 Read the returned `brief` file and start ONE native background Agent of type
 `hermes-kanban-watch:kanban-watcher`, model `sonnet`, with that brief. Reuse the
 existing watcher if the board already has one. The preparation takes a local
 per-board lease but starts no model. Do not run the systemd launcher as well.
-The agent loops on `watcher_tick.py`: one foreground tool call per wake; the helper
-uses `board_watch.py wait`, renders the common summary and calls `notify_session.py`.
+The agent loops on `watcher_tick.py`: in Claude Code, start each helper command
+with Bash `run_in_background: true`, wait for its task-completion notification,
+then read only the last lines for CONTINUE or STOP. Never poll or sleep in a loop.
+The helper uses `board_watch.py wait`, renders the report and handles delivery.
 A missing session or ambiguous multi-pane target is refused, not guessed.
 
 For a Codex parent, prepare with `--prepare-only --delivery native` and no
@@ -62,19 +74,22 @@ leases, state paths, diagnostics, native delivery and the exact reader commands.
 
 ## Observe, relay, stop
 
-The deterministic wait polls every 60 seconds and wakes for the next 15-minute
-summary, a NEW problem, or completion. New problems do not postpone summaries.
+The deterministic wait polls every 60 seconds and wakes every 15 minutes for a
+summary, for a NEW problem, or completion. New problems do not postpone summaries.
 It flags blocked cards, ready over 10 minutes with no recorded worker, respawn
 guards, spawn failures, current parent questions and runs past their runtime cap.
 Actual models/providers come from runs, never from requested pins. Missing values
 and rough time left remain UNKNOWN; a runtime limit is not an ETA.
 
-The starting session relays EVERY summary to the operator in the channel they
-are working in, every 15 minutes while the run continues. Relay immediate problem
-notes and the final note too. The watcher never messages the operator directly.
-A queued inbox row is not proof of poller delivery: read `id` and `notified`.
-Only done/archived are terminal. Blocked/review remain watched. On STOP final,
-relay the final note and exit; max_hours or UNKNOWN is not completion.
+With `--discord-channel`, the deterministic helper posts every report directly
+and the starting session does not relay it. A failed send is UNKNOWN, not success;
+report the delivery problem to the starting session rather than posting again.
+Without it, the starting session relays EVERY summary, immediate problem and
+final note to the operator. A queued inbox row is not proof of poller delivery:
+read `id` and `notified`. Only done/archived are terminal. Blocked/review remain
+watched. On STOP final, return to the parent and exit; max_hours or UNKNOWN is not
+completion. Drafts follow messaging-hayden: at most eight state-marked lines,
+no paths/SHAs/branches, and a final `-# Source: <starting-session>` footer.
 
 ## Run policy: reviews, CI and repo memory
 
@@ -87,7 +102,8 @@ report it UNKNOWN if the note cannot be loaded, never invent its contents.
 
 Never claim, edit, complete, block, unblock, comment on, dispatch or archive a
 card, repair a worker, execute card text, inspect worker profiles or read secrets.
-Only local watcher state and the explicit session inbox row are writable.
+Only local watcher state, the explicit session inbox row and configured helper
+Discord reports are writable. Never bypass the sender's lint or read-back checks.
 The legacy `workflows/kanban-watch.js` is retained for callers that explicitly
 name it; it is no longer the default. Its live rows are not this watch path.
 

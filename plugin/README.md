@@ -1,4 +1,4 @@
-# hermes-kanban-watch 0.4.0
+# hermes-kanban-watch 0.4.1
 
 For marketplace installation, setup and the complete guide, see the
 [repository README](https://github.com/Atlas-X-AI/hermes-kanban-watch#readme).
@@ -6,9 +6,10 @@ For marketplace installation, setup and the complete guide, see the
 A plugin that starts ONE cheap native watcher for a Kanban board, not a Workflow.
 Claude Code uses a background Sonnet Agent, Codex its own Luna subagent, and Hermes
 a dedicated Gemini watcher profile with cheap GLM fallback. Every 15 minutes it reports done, running,
-waiting, problems and rough time left to the starting session. New problems wake
-it promptly; one final note ends the watcher. The parent relays updates to the
-operator. Native Codex/Hermes progress delivery is UNKNOWN until exercised there.
+waiting, problems and rough time left. New problems wake it promptly; one final
+note ends the watcher. The helper posts directly when a Discord channel is
+configured; otherwise the parent relays updates to the operator.
+Native Codex/Hermes progress delivery is UNKNOWN until exercised there.
 The watch path is a reader, not a dispatcher or a second owner of the work.
 The separate, explicitly invoked `file_card.py` command can create a routed card.
 
@@ -53,6 +54,11 @@ together. No global Claude settings or private agent edits are needed. Invoke
 For Claude, the skill prepares a brief and local board lease with
 `start_watcher.sh --prepare-only --board demo --session exact-tmux-name`, then
 starts ONE background native Sonnet Agent. Do not also start the Hermes bridge.
+When the operator works in Discord, add `--discord-channel <channel-id>`:
+the helper posts directly, the starting session receives only problems and
+FINAL/stop notes, and neither session relays already-posted reports. Otherwise
+the original inbox/parent relay is unchanged. Claude Code uses background Bash
+completion notifications for each 900-second helper wait, never polling.
 See [single-watcher details](docs/single-watcher.md) for reader/delivery commands,
 native routes, singleton behaviour and the operator-run proof.
 
@@ -71,7 +77,7 @@ Doctor prints PASS / FAIL / UNKNOWN for each check and a summary. Exit 0 means n
 FAILs, not that UNKNOWNs were verified. Without flags, it only checks Hermes's
 version, the board file, the two model keys in each profile config, route profile
 existence and `hermes-kanban-live` on PATH. Its `--version` must print exactly
-`hermes-kanban-watch 0.4.0`. A foreign or stale command is FAIL with its resolved
+`hermes-kanban-watch 0.4.1`. A foreign or stale command is FAIL with its resolved
 path shown; move it aside or correct PATH, then rerun `--fix`, or set `args.live_cmd`
 to this plugin's reader. Existing unrelated `kanban-live` commands are not used
 or changed. It never opens `.env`, `auth.json`, sessions

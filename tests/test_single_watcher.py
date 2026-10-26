@@ -172,6 +172,21 @@ def test_delivery_failure_keeps_pending_for_same_config_retry(launch_env, tmp_pa
         assert conn.execute("select count(*) from messages").fetchone()[0] == 1
 
 
+def test_claude_brief_uses_background_completion_not_foreground_timeout(launch_env):
+    receipt = json.loads(launch("--prepare-only").stdout)
+    brief = Path(receipt["brief"]).read_text()
+    claude = brief.split("Claude Code:", 1)[1].split("Hermes:", 1)[0]
+    assert "run_in_background: true" in claude
+    assert "task-completion notification" in claude
+    assert "last lines" in claude
+    assert "Never poll" in claude and "sleep" in claude
+    assert "960" not in claude and "foreground" not in claude
+    hermes = brief.split("Hermes:", 1)[1]
+    assert "foreground" in hermes and "960" in hermes
+    config = json.loads(Path(receipt["config"]).read_text())
+    assert config["every"] == 900
+
+
 def test_superseded_lease_never_delivers(launch_env):
     _, inbox = launch_env
     receipt = json.loads(launch("--cards", "t_done").stdout)
