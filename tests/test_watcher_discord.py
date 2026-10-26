@@ -111,7 +111,10 @@ def test_summary_problem_final_sent_directly_without_summary_inbox(discord_env, 
     assert len(messages) == 3
     assert "🟢 Done: 0" in messages[0]["text"]
     assert "🟡 Waiting: 1" in messages[0]["text"]
-    assert "🔴 Problems: 1" in messages[1]["text"]
+    # A problem wake that is also a due summary posts plain progress: problems are the
+    # starting session's to handle (operator ruling, 2026-10-26).
+    assert "Kanban progress update" in messages[1]["text"]
+    assert all("roblem" not in m["text"] and "investigate" not in m["text"] for m in messages)
     assert "FINAL" in messages[-1]["text"] and "🟢 Done: 1" in messages[-1]["text"]
     draft = Path(config["relay_state"]).with_name("discord-draft.md")
     lint = subprocess.run([str(sender), str(draft), "--lint-only"],
@@ -125,6 +128,25 @@ def test_summary_problem_final_sent_directly_without_summary_inbox(discord_env, 
     assert len(calls_at(calls)) == 3 and len(inbox_texts(inbox)) == 2
     assert board.read_bytes() == before
     assert json.loads(Path(config["lease"]).read_text())["stopped"]
+
+
+def test_problem_between_summaries_reaches_only_the_starting_session(discord_env, board):
+    calls, inbox, _ = discord_env
+    with sqlite3.connect(board) as conn:
+        conn.execute("update tasks set status='blocked' where id='t_wait'")
+    receipt, _ = prepare("--cards", "t_wait", "--every", "900")
+    problem = tick(receipt)
+    assert problem.returncode == 0 and "CONTINUE problem" in problem.stdout
+    assert not calls.exists()
+    rows = inbox_texts(inbox)
+    assert len(rows) == 1 and rows[0].startswith("problem:")
+    with sqlite3.connect(board) as conn:
+        conn.execute("update tasks set status='done' where id='t_wait'")
+    final = tick(receipt)
+    assert final.returncode == 0 and "STOP final" in final.stdout
+    messages = calls_at(calls)
+    assert len(messages) == 1 and "FINAL" in messages[0]["text"]
+    assert "roblem" not in messages[0]["text"]
 
 
 @pytest.mark.parametrize("mode", ["1", "2", "missing-ok"])
@@ -185,9 +207,10 @@ def test_unknown_read_and_time_limit_are_not_done(discord_env, board, reason):
     out = tick(receipt)
     assert out.returncode == (5 if reason == "UNKNOWN" else 0)
     assert f"STOP {reason}" in out.stdout
-    text = calls_at(calls)[0]["text"]
-    assert "UNKNOWN" in text and "FINAL" not in text
-    assert len(inbox_texts(inbox)) == 1
+    # A read failure or time limit is the starting session's to handle: inbox only, never Discord.
+    assert not calls.exists()
+    rows = inbox_texts(inbox)
+    assert len(rows) == 1 and "FINAL" not in rows[0]
 
 
 @pytest.mark.parametrize("channel", ["", "../bad", "1;exit", "@everyone"])

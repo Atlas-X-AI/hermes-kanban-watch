@@ -1,6 +1,6 @@
 [project]
 name = "hermes-kanban-watch"
-version = "0.4.1"
+version = "0.4.2"
 description = "One read-only Kanban watcher per board with 15-minute parent summaries"
 readme = "README.md"
 requires-python = ">=3.11"

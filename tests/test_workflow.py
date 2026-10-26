@@ -195,7 +195,7 @@ def test_feature_docs_known_red_unlinked_file(tmp_path):
 
 def test_public_contract_metadata_agent_skill_hooks():
     manifest = json.loads((PLUGIN / ".claude-plugin/plugin.json").read_text())
-    assert manifest["name"] == "hermes-kanban-watch" and manifest["version"] == "0.4.1"
+    assert manifest["name"] == "hermes-kanban-watch" and manifest["version"] == "0.4.2"
     assert manifest["author"]["name"] and manifest["description"]
     hook = json.loads((PLUGIN / "hooks/hooks.json").read_text())["hooks"]["PostToolUse"][0]
     assert hook["matcher"] == "Bash"

@@ -78,7 +78,7 @@ Doctor reports PASS / FAIL / UNKNOWN. Exit 0 means no FAILs, not that UNKNOWNs
 were verified. It checks Hermes's version, board-file existence (not schema
 compatibility), `model.provider` and `model.default` in profile configs, routed
 profile existence and the reader on PATH. The reader's `--version` must print
-exactly `hermes-kanban-watch 0.4.1`. A foreign or stale `hermes-kanban-live` is FAIL,
+exactly `hermes-kanban-watch 0.4.2`. A foreign or stale `hermes-kanban-live` is FAIL,
 with its resolved path shown, even with `--fix`. Move that command aside or fix
 PATH before rerunning `--fix`, or use `args.live_cmd` for this plugin's reader.
 The doctor never overwrites a conflicting command. Existing unrelated

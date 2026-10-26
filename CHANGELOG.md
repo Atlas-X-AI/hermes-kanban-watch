@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.2
+
+- In `--discord-channel` mode, post only the 15-minute progress summaries and the
+  FINAL note to the operator's channel, with no problem count or "investigate" line.
+  A problem between summaries, a time-limit stop and a failed read reach only the
+  starting session's inbox, which handles them (operator ruling, 2026-10-26: progress
+  and results only).
+
 ## 0.4.1
 
 - Use Claude Code background Bash waits with completion notifications, not a
