@@ -41,6 +41,10 @@ def launch(args):
             raise ValueError("--discord-channel must be a numeric channel ID")
         if not args.session or not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", args.session):
             raise ValueError("--discord-channel requires --session with the exact starting session name")
+        if not args.prepare_only:
+            raise ValueError("Direct Discord delivery is unsupported in a detached watcher; "
+                             "omit --discord-channel and use parent relay")
+        # Resolving the parent pane is not proof of the future helper's sender identity.
         resolve_pane(args.session)
     if delivery == "inbox":
         if not args.session:
@@ -76,7 +80,9 @@ def launch(args):
     if tool_timeout > 7100:
         raise ValueError("--every is too long for a foreground tool call (maximum 7040 seconds)")
     delivery_instructions = (
-        "The helper posts directly to the configured Discord channel; the starting session does not relay reports. "
+        "The helper attempts direct Discord delivery only if the sender verifies its actual execution-context identity; "
+        "preparing this brief or resolving the starting pane does not prove that route. "
+        "The starting session does not relay reports. "
         "Only problem and FINAL notes (including UNKNOWN/time-limit stops) go to its inbox; never relay routine summaries."
         if args.discord_channel else
         "It queues the inbox row when delivery=inbox; the starting session relays each summary to the operator. "
@@ -115,7 +121,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--board", required=True)
     parser.add_argument("--session", help="Exact starting Claude tmux session; implies inbox delivery")
-    parser.add_argument("--discord-channel", help="Post reports directly to this Discord channel; requires --session")
+    parser.add_argument("--discord-channel", help="Conditional direct Discord for --prepare-only; requires --session; detached launches use parent relay")
     parser.add_argument("--cards", nargs="+", action="extend")
     parser.add_argument("--every", type=float, default=900)
     parser.add_argument("--max-hours", type=float, default=12)

@@ -92,18 +92,36 @@ def discord_draft(wake, session):
     return "\n".join([*lines, f"-# Source: {session}"])
 
 
+class DiscordDeliveryError(ValueError):
+    """Only fixed classifications and exit status may leave the sender boundary."""
+
+    def __init__(self, kind, exit_code=None):
+        self.failure = {"kind": kind, "exit_code": exit_code}
+        super().__init__(f"Discord delivery UNKNOWN ({kind}; sender exit {exit_code})")
+
+
 def send_discord(config, wake):
     draft = Path(config["relay_state"]).with_name("discord-draft.md")
     draft.write_text(discord_draft(wake, config["session"]), encoding="utf-8")
     sender = os.environ.get("KANBAN_WATCH_DISCORD_SENDER") or str(
         Path.home() / ".claude/skills/messaging-hayden/bin/send-hayden.sh")
-    result = subprocess.run([sender, str(draft), "--channel", config["discord_channel"]],
-                            capture_output=True, text=True, timeout=45)
+    # The normal sender checks identity in THIS process context, not the parent's
+    # resolved pane. Never pass a service identity or borrow the starting session's.
+    try:
+        result = subprocess.run([sender, str(draft), "--channel", config["discord_channel"]],
+                                capture_output=True, text=True, timeout=45)
+    except subprocess.TimeoutExpired:
+        raise DiscordDeliveryError("sender_timeout") from None
+    except OSError:
+        raise DiscordDeliveryError("sender_unavailable") from None
     # The wrapper lints, sends and reads back. Exit zero alone is insufficient.
+    # Neither stdout/stderr nor a guessed cause (e.g. identity refusal) is retained.
+    if result.returncode:
+        raise DiscordDeliveryError("sender_exit", result.returncode)
     lines = result.stdout.splitlines()
     receipt = re.fullmatch(r"ok ([0-9]+) reactions=0/0", lines[-1]) if lines else None
-    if result.returncode or not receipt:
-        raise ValueError(f"Discord delivery UNKNOWN (sender exit {result.returncode}; no verified receipt)")
+    if not receipt:
+        raise DiscordDeliveryError("receipt_missing", result.returncode)
     return {"message_id": receipt[1], "channel": config["discord_channel"]}
 
 
@@ -113,6 +131,11 @@ def relay_tick(config):
     if relay.get("stopped"):
         print("STOP " + relay["stopped"])
         return 0
+    if ("discord_failure" in relay or
+            (config.get("discord_channel") and relay.get("pending") and not relay.get("discord_receipt"))):
+        # A pending event from an interrupted/older helper cannot prove no send
+        # occurred, even when it predates structured failure records.
+        raise ValueError("Discord delivery UNKNOWN; pending event retained; reconciliation required, no retry")
     with owned_lease(config):
         pass
     if not relay.get("pending"):
@@ -138,15 +161,26 @@ def relay_tick(config):
     to_discord = discord and (reason == "final" or bool(wake.get("summary_due")))
     with owned_lease(config):
         if to_discord and not relay.get("discord_receipt"):
+            # Fail closed across a crash during the external call too. A verified
+            # receipt clears this marker; an incomplete attempt is never retried.
+            relay["discord_failure"] = {"kind": "attempt_incomplete", "exit_code": None}
+            atomic_json(relay_path, relay)
             try:
                 relay["discord_receipt"] = send_discord(config, wake)
+                relay.pop("discord_failure")
                 # If the inbox fails next, an authorised retry must not repost.
                 atomic_json(relay_path, relay)
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                failure = exc if isinstance(exc, DiscordDeliveryError) else DiscordDeliveryError("sender_error")
+                relay["discord_failure"] = failure.failure
+                atomic_json(relay_path, relay)  # Persist before trying the parent inbox.
                 if config["delivery"] == "inbox":
-                    notify(config["session"], "problem: Discord delivery UNKNOWN; stop and investigate before retrying.",
-                           key + ":discord-unknown")
-                raise ValueError("Discord delivery UNKNOWN; pending event retained") from exc
+                    try:
+                        notify(config["session"], f"problem: {failure}; stop for reconciliation, no retry.",
+                               key + ":discord-unknown")
+                    except (OSError, ValueError, sqlite3.Error, subprocess.SubprocessError):
+                        raise ValueError(f"{failure}; pending event retained; parent notification UNKNOWN") from None
+                raise ValueError(f"{failure}; pending event retained; reconciliation required, no retry") from None
         if config["delivery"] == "inbox" and (not discord or reason != "summary"):
             receipt = notify(config["session"], text, key)
             relay["last_receipt"] = receipt
