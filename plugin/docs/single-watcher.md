@@ -2,9 +2,11 @@
 
 The default watch is one cheap native background agent, not the retained
 `workflows/kanban-watch.js`. The starting session launches it right after filing.
-When the operator works in Discord, configure `--discord-channel`: the deterministic
-helper posts reports directly and the starting session does not relay them. Without
-it, the starting session relays summaries, immediate problems and the final note.
+For a native prepared watcher, `--discord-channel` requests conditional direct
+reports. The sender must verify the helper's actual execution-context identity;
+resolving the starting pane is not proof. Detached direct-Discord launches are
+unsupported and refused before state, lease or service creation. Omit the option
+for parent relay of summaries, immediate problems and the final note.
 The watcher agent never composes or sends a human message itself.
 
 ## Choose the starting harness, not a second model host
@@ -107,12 +109,21 @@ The reader does not invoke any board-mutation CLI.
 
 ## Direct Discord reports
 
-`--discord-channel <id>` is the default for a Claude Code operator working in
-Discord. It requires `--session` for the exact starting session, validates a
-numeric channel ID, and stores `discord_channel` in the watcher config. The helper
-calls `~/.claude/skills/messaging-hayden/bin/send-hayden.sh <draft> --channel <id>`
-once for each summary, problem and FINAL. It also reports read UNKNOWN and the
-time-limit stop without claiming completion. No model formats or sends a report.
+`--prepare-only --discord-channel <id>` requires `--session` for the exact
+starting session, validates a numeric channel ID, and stores `discord_channel`
+in the watcher config. Preparation starts no sender and cannot validate a future
+native child's ancestry. Only use this route where the normal sender can truthfully
+verify identity in the helper's actual execution context. Otherwise omit the option
+and use parent relay. A parent's valid pane, inherited environment or native-agent
+label is not proof of that child's identity. No new identity override is accepted.
+
+The helper calls the normal
+`~/.claude/skills/messaging-hayden/bin/send-hayden.sh <draft> --channel <id>` for due
+progress summaries and FINAL only. Problems between summaries, read UNKNOWN and
+time-limit stops go to the starting session, not Discord. Detached systemd direct
+sends are refused before any state/lease/service creation, even when the parent
+pane resolves. Supporting a detached sender would require a separately commissioned
+attribution/policy decision; this change neither requests nor broadens an allowlist.
 
 Drafts contain at most eight lines: done, running, waiting, problems, rough time
 left and next-step context, each with one state marker. The final line is
@@ -122,20 +133,35 @@ The local plain-text summary still gives the parent the diagnostic detail.
 
 The wrapper must lint, send and read the message back. Any non-zero exit,
 missing final `ok <id> reactions=0/0` receipt, timeout or missing sender is
-`delivery UNKNOWN`, never success. Its own live source-identity check must
-succeed in the starting pane; a detached process without that identity cannot
-claim delivery. There is no DM fallback or source-identity bypass.
+`delivery UNKNOWN`, never success. Its normal live source-identity check must
+succeed in the helper's own execution context; a detached process without that
+identity cannot claim delivery. There is no DM fallback or source-identity bypass.
 
 With Discord enabled, `notify_session.py` queues only problem and FINAL/stop
 notes, including UNKNOWN and time-limit stops, not routine summaries. Neither
 parent nor watcher relays already-posted reports. Without the option, all
 existing inbox/native relay behaviour is unchanged.
 
-A failed send keeps the pending event and lease for parent investigation. Use the
-same config for an explicitly authorised retry; UNKNOWN may mean sent but not
-verified, so check before retrying. A verified send receipt is saved before the
-inbox write so an inbox-only retry does not repost to Discord. A process killed
-between sending and recording that receipt still has an uncertain outcome.
+A failed send keeps the pending event and lease for parent investigation, and
+records only `discord_failure: {kind, exit_code}`. Kinds are `sender_exit`,
+`receipt_missing`, `sender_timeout`, `sender_unavailable` or `sender_error`;
+`attempt_incomplete` marks a crash/interruption during an attempted send. Raw
+sender stdout/stderr, exception text, environment and response bodies are never
+copied into diagnostics. A non-zero exit does not prove a specific cause: for
+example, exit 1 alone cannot distinguish identity refusal from other refusals.
+The safe classification is saved before attempting the parent inbox notice.
+
+Any failure marker blocks subsequent ticks before another send or notification;
+changing the execution context does not clear it. UNKNOWN may mean sent but not
+verified. Reconcile independently with the accountable parent; no retry/clear
+flag, caller override or automatic recovery is provided. In particular, do not
+resume an older config with a previously UNKNOWN pending send just because it
+lacks this new diagnostic field. This change does not migrate or reconcile live
+state, and is not permission to resend issue 7's pending event.
+
+A verified send receipt is saved before the inbox write so an inbox-only retry
+does not repost to Discord. A process killed between sending and recording that
+receipt still has an uncertain outcome, not crash-safe exactly-once delivery.
 
 Tests inject `KANBAN_WATCH_DISCORD_SENDER` with an absolute fake executable; it is
 never set from card text. They exercise its `--lint-only` mode without a real
@@ -174,9 +200,12 @@ run old and new watcher versions concurrently against the same lease.
 Final/max_hours/UNKNOWN-read stops release the local lease. A killed watcher or
 failed delivery keeps it until its deadline; inspect it rather than silently
 starting a duplicate. No state directory is automatically removed.
-Pending delivery is durable and has a stable dedupe key. An authorised retry
-uses the SAME config, not another watch. The helper verifies lease ownership
-again before delivery, so a superseded watcher cannot send into a newer run.
+Pending delivery is durable and has a stable dedupe key. Only an inbox-only
+retry with a verified Discord receipt can resume without reconciliation. Any
+existing Discord pending event without a receipt, including legacy state with no
+failure field, is refused without modifying it or sending. The helper verifies
+lease ownership again before delivery, so a superseded watcher cannot send into
+a newer run.
 
 ## Run policy and legacy tools
 

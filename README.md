@@ -129,9 +129,14 @@ Hermes Kanban board (SQLite mode=ro)
 For Claude Code, prepare a lease/brief with
 `bash "<plugin dir>/scripts/start_watcher.sh" --prepare-only --board demo --session exact-tmux-name`,
 then launch ONE background `hermes-kanban-watch:kanban-watcher` Agent on Sonnet.
-When working in Discord, add `--discord-channel <channel-id>`: the helper posts
-reports directly through the lint-gated messaging sender and the starting session
-does not relay them. It queues only problems and FINAL/stop notes to that session.
+When working in Discord, `--prepare-only --discord-channel <channel-id>` enables
+conditional direct reports: the sender must verify identity in the helper's actual
+execution context, not merely resolve the parent pane. Detached direct-Discord
+launches are refused before taking a lease or creating a service; omit
+`--discord-channel` and use parent relay instead. On a supported direct route the
+starting session does not relay reports and receives only problems and FINAL/stop
+notes. A delivery UNKNOWN retains pending state and safe failure kind/exit status,
+then refuses further send attempts until reconciliation. No retry override is provided.
 Without the option, it queues every report as a `project_channel_message` for
 the exact session/pane; the existing inbox poller types it at an idle prompt.
 Queued is not delivered. Claude Code runs each helper with Bash

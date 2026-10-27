@@ -54,9 +54,14 @@ together. No global Claude settings or private agent edits are needed. Invoke
 For Claude, the skill prepares a brief and local board lease with
 `start_watcher.sh --prepare-only --board demo --session exact-tmux-name`, then
 starts ONE background native Sonnet Agent. Do not also start the Hermes bridge.
-When the operator works in Discord, add `--discord-channel <channel-id>`:
-the helper posts directly, the starting session receives only problems and
-FINAL/stop notes, and neither session relays already-posted reports. Otherwise
+For a native prepared watcher, `--discord-channel <channel-id>` is conditional on
+the sender verifying the helper's actual execution-context identity. Preparation
+and parent-pane resolution do not prove that route. Detached direct-Discord
+launches are refused before state/lease/service creation; omit the option for
+parent relay. On a supported direct route, the starting session receives only
+problems and FINAL/stop notes, and neither session relays already-posted reports.
+Delivery UNKNOWN preserves pending state plus safe kind/exit status and blocks
+further send attempts pending reconciliation, without a retry override. Otherwise
 the original inbox/parent relay is unchanged. Claude Code uses background Bash
 completion notifications for each 900-second helper wait, never polling.
 See [single-watcher details](docs/single-watcher.md) for reader/delivery commands,

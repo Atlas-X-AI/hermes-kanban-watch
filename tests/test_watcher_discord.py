@@ -47,6 +47,9 @@ mode = os.environ.get('FAKE_DISCORD_MODE', 'ok')
 if mode == 'missing-ok':
     print('PASS but missing final receipt')
     sys.exit(0)
+if mode == 'source-identity-refused':
+    print('source identity refused: PRIVATE-SENDER-DIAGNOSTIC', file=sys.stderr)
+    sys.exit(1)
 if mode != 'ok':
     print('UNTRUSTED sender output must not become a delivery claim')
     print('ok 987654321098765432 reactions=0/0')  # Even a success-looking line cannot override a non-zero exit.
@@ -149,24 +152,34 @@ def test_problem_between_summaries_reaches_only_the_starting_session(discord_env
     assert "roblem" not in messages[0]["text"]
 
 
-@pytest.mark.parametrize("mode", ["1", "2", "missing-ok"])
+@pytest.mark.parametrize("mode", ["1", "2", "missing-ok", "source-identity-refused"])
 def test_failed_discord_delivery_is_unknown_pending_and_alerts_parent(discord_env, monkeypatch, mode):
     calls, inbox, _ = discord_env
     receipt, config = prepare("--cards", "t_done")
     monkeypatch.setenv("FAKE_DISCORD_MODE", mode)
     failed = tick(receipt)
     assert failed.returncode == 5 and "delivery UNKNOWN" in failed.stderr
-    assert "UNTRUSTED" not in failed.stdout + failed.stderr
-    relay = json.loads(Path(config["relay_state"]).read_text())
+    relay_path = Path(config["relay_state"])
+    relay = json.loads(relay_path.read_text())
+    expected = {"kind": "receipt_missing", "exit_code": 0} if mode == "missing-ok" else {
+        "kind": "sender_exit", "exit_code": 1 if mode == "source-identity-refused" else int(mode)}
+    assert relay["discord_failure"] == expected
+    assert expected["kind"] in failed.stderr
+    assert "UNTRUSTED" not in failed.stdout + failed.stderr + relay_path.read_text()
+    assert "PRIVATE-SENDER-DIAGNOSTIC" not in failed.stdout + failed.stderr + relay_path.read_text()
     assert relay["pending"]["reason"] == "final"
     assert "discord_receipt" not in relay
     assert not json.loads(Path(config["lease"]).read_text())["stopped"]
-    assert len(inbox_texts(inbox)) == 1 and "Discord delivery UNKNOWN" in inbox_texts(inbox)[0]
+    rows = inbox_texts(inbox)
+    assert len(rows) == 1 and "Discord delivery UNKNOWN" in rows[0]
+    assert expected["kind"] in rows[0]
+    before = relay_path.read_bytes()
     monkeypatch.setenv("FAKE_DISCORD_MODE", "ok")
-    recovered = tick(receipt)
-    assert recovered.returncode == 0 and "STOP final" in recovered.stdout
-    assert len(calls_at(calls)) == 2
-    assert len(inbox_texts(inbox)) == 2 and "FINAL:" in inbox_texts(inbox)[-1]
+    again = tick(receipt)
+    assert again.returncode == 5 and "reconciliation required" in again.stderr
+    assert len(calls_at(calls)) == 1
+    assert inbox_texts(inbox) == rows
+    assert relay_path.read_bytes() == before
 
 
 def test_successful_discord_send_not_repeated_after_inbox_failure(discord_env, monkeypatch, tmp_path):
@@ -226,3 +239,66 @@ def test_discord_requires_starting_session(discord_env):
                           "--delivery", "native", "--board", "demo", "--discord-channel", CHANNEL],
                          capture_output=True, text=True, timeout=5)
     assert out.returncode != 0 and "--session" in out.stderr
+
+
+def test_detached_discord_refused_before_state_or_service(discord_env):
+    calls, inbox, _ = discord_env
+    state_root = Path(os.environ["XDG_STATE_HOME"]) / "hermes-kanban-watch"
+    out = launch("--discord-channel", CHANNEL, "--cards", "t_done")
+    assert out.returncode == 1
+    assert "detached" in out.stderr and "parent relay" in out.stderr
+    assert not state_root.exists()
+    assert not Path(os.environ["UNIT_CALLS"]).exists()
+    assert not calls.exists() and inbox_texts(inbox) == []
+    # The rejected direct launch did not reserve the board; parent relay still works.
+    parent = launch("--cards", "t_done")
+    assert parent.returncode == 0, parent.stderr
+    assert tick(json.loads(parent.stdout)).returncode == 0
+    assert len(inbox_texts(inbox)) == 1 and not calls.exists()
+
+
+def test_unknown_recorded_before_parent_notification_failure(discord_env, monkeypatch, tmp_path):
+    calls, _, _ = discord_env
+    receipt, config = prepare("--cards", "t_done")
+    tmux = tmp_path / "bin/tmux"
+    good = tmux.read_text()
+    tmux.write_text(f"#!{sys.executable}\nraise SystemExit(1)\n")
+    monkeypatch.setenv("FAKE_DISCORD_MODE", "source-identity-refused")
+    assert tick(receipt).returncode == 5
+    relay = json.loads(Path(config["relay_state"]).read_text())
+    assert relay["discord_failure"] == {"kind": "sender_exit", "exit_code": 1}
+    assert relay["pending"]["reason"] == "final"
+    tmux.write_text(good)
+    monkeypatch.setenv("FAKE_DISCORD_MODE", "ok")
+    assert tick(receipt).returncode == 5
+    assert len(calls_at(calls)) == 1
+
+
+@pytest.mark.parametrize("error,kind", [
+    (subprocess.TimeoutExpired(["PRIVATE-SENDER-DIAGNOSTIC"], 45,
+                               output="PRIVATE-SENDER-DIAGNOSTIC", stderr="PRIVATE-SENDER-DIAGNOSTIC"),
+     "sender_timeout"),
+    (PermissionError("PRIVATE-SENDER-DIAGNOSTIC"), "sender_unavailable"),
+])
+def test_sender_process_errors_are_safe_and_not_retried(discord_env, monkeypatch, error, kind):
+    # Run the real relay logic in-process so timeouts need no 45-second wait.
+    monkeypatch.syspath_prepend(str(PLUGIN / "scripts"))
+    import watcher_tick
+    _, _, _ = discord_env
+    receipt, config = prepare("--cards", "t_done")
+    attempts = []
+
+    def fail(*args, **kwargs):
+        attempts.append(1)
+        raise error
+
+    monkeypatch.setattr(watcher_tick.subprocess, "run", fail)
+    monkeypatch.setattr(watcher_tick, "notify", lambda *args: {"queued": True})
+    for _ in range(2):
+        with pytest.raises(ValueError) as caught:
+            watcher_tick.tick(receipt["config"])
+        assert "PRIVATE-SENDER-DIAGNOSTIC" not in str(caught.value)
+    relay = json.loads(Path(config["relay_state"]).read_text())
+    assert relay["discord_failure"] == {"kind": kind, "exit_code": None}
+    assert relay["pending"]["reason"] == "final" and "discord_receipt" not in relay
+    assert len(attempts) == 1
