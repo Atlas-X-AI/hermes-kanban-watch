@@ -58,7 +58,9 @@ For a native prepared watcher, `--discord-channel <channel-id>` is conditional o
 the sender verifying the helper's actual execution-context identity. Preparation
 and parent-pane resolution do not prove that route. Detached direct-Discord
 launches are refused before state/lease/service creation; omit the option for
-parent relay. On a supported direct route, the starting session receives only
+parent relay. `--discord-session <name>` resolves the session's channel on the
+loopback relay for every post instead of a fixed id; a failed lookup is a problem
+note to the starting session. On a supported direct route, the starting session receives only
 problems and FINAL/stop notes, and neither session relays already-posted reports.
 Delivery UNKNOWN preserves pending state plus safe kind/exit status and blocks
 further send attempts pending reconciliation, without a retry override. Otherwise

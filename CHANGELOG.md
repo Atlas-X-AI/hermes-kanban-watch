@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Flag `model_drift` on first sight: a run whose `model_used` differs from the card's
+  pin (`model_override`), or that recorded `fallback_from` without a pin, is an immediate
+  problem note to the starting session, not a harvest-time surprise.
+- Add `--discord-session <name>`: resolve the live session's channel per post via the
+  loopback relay (`GET /discord/sessions/<name>/channel`) instead of a frozen id. A
+  resolver failure posts nothing, is reported to the starting session with the unposted
+  summary, and the next post resolves again. `--discord-channel` keeps working.
+- Cards marked SUPERSEDED (block reason, latest block event or a comment since work last
+  resumed) are no longer problems and are not counted as waiting.
+  Closes #9.
+
 ## 0.4.2
 
 - In `--discord-channel` mode, post only the 15-minute progress summaries and the

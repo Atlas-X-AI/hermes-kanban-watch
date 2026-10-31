@@ -18,7 +18,9 @@ cursors and pending receipts are local state, not board mutations.
 `notify_session.py` may insert one explicit exact-session inbox row and reads it
 back; this is its only external write. It never types directly into tmux and
 refuses missing/ambiguous session targets. Native parent stdout is not proven
-delivery. With `--discord-channel`, `watcher_tick.py` additionally delegates
+delivery. With `--discord-session`, `watcher_tick.py` first makes one read-only GET to the
+loopback relay (`127.0.0.1`/`localhost`/`::1` only, no proxy) to resolve that session's
+channel id; the session name never leaves the host. With either Discord option it delegates
 bounded, counts-only reports to the existing lint-gated/read-back messaging
 sender. No card text enters the Discord draft. Sender failure, timeout or absent
 verified receipt is UNKNOWN; tests inject a fake executable and never post.

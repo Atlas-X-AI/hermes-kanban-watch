@@ -133,7 +133,9 @@ When working in Discord, `--prepare-only --discord-channel <channel-id>` enables
 conditional direct reports: the sender must verify identity in the helper's actual
 execution context, not merely resolve the parent pane. Detached direct-Discord
 launches are refused before taking a lease or creating a service; omit
-`--discord-channel` and use parent relay instead. On a supported direct route the
+`--discord-channel` and use parent relay instead. `--discord-session <name>` replaces a fixed
+channel id with a per-post loopback lookup of that live session's channel, so a re-created
+channel keeps working; a lookup failure posts nothing and is reported to the starting session. On a supported direct route the
 starting session does not relay reports and receives only problems and FINAL/stop
 notes. A delivery UNKNOWN retains pending state and safe failure kind/exit status,
 then refuses further send attempts until reconciliation. No retry override is provided.

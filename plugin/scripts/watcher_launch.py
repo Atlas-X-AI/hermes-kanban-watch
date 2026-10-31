@@ -19,7 +19,7 @@ import uuid
 
 from board_watch import atomic_json, board_path, positive, snapshot, validate_scope
 from notify_session import resolve_pane
-from watcher_tick import lease_lock, read_lease, release_lease
+from watcher_tick import SESSION_NAME, lease_lock, read_lease, release_lease
 
 PLUGIN = Path(__file__).resolve().parents[1]
 
@@ -36,14 +36,19 @@ def launch(args):
     validate_scope(args.board, args.cards)
     every, hours = positive(args.every), positive(args.max_hours)
     delivery = args.delivery or ("inbox" if args.session else "native")
-    if args.discord_channel is not None:
-        if not re.fullmatch(r"[0-9]{1,20}", args.discord_channel):
-            raise ValueError("--discord-channel must be a numeric channel ID")
+    if args.discord_channel is not None and args.discord_session is not None:
+        raise ValueError("Use --discord-session (resolved per post) or --discord-channel, not both")
+    if args.discord_session is not None and not SESSION_NAME.fullmatch(args.discord_session):
+        raise ValueError("--discord-session must be a live-session name (letters, digits, . _ -)")
+    if args.discord_channel is not None and not re.fullmatch(r"[0-9]{1,20}", args.discord_channel):
+        raise ValueError("--discord-channel must be a numeric channel ID")
+    direct = args.discord_channel is not None or args.discord_session is not None
+    if direct:
         if not args.session or not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", args.session):
-            raise ValueError("--discord-channel requires --session with the exact starting session name")
+            raise ValueError("--discord-channel/--discord-session requires --session with the exact starting session name")
         if not args.prepare_only:
             raise ValueError("Direct Discord delivery is unsupported in a detached watcher; "
-                             "omit --discord-channel and use parent relay")
+                             "omit --discord-channel/--discord-session and use parent relay")
         # Resolving the parent pane is not proof of the future helper's sender identity.
         resolve_pane(args.session)
     if delivery == "inbox":
@@ -69,7 +74,7 @@ def launch(args):
     seconds = hours * 3600
     config = {"board": args.board, "cards": args.cards, "board_home": str(board_home), "every": every,
               "until": time.time() + seconds, "session": args.session, "delivery": delivery, "launch_id": launch_id,
-              "discord_channel": args.discord_channel,
+              "discord_channel": args.discord_channel, "discord_session": args.discord_session,
               "cursor": str(directory / "cursor.json"), "relay_state": str(directory / "relay.json"),
               "lease": str(root / "leases" / f"{args.board}.json")}
     config_path = directory / "config.json"
@@ -84,7 +89,7 @@ def launch(args):
         "preparing this brief or resolving the starting pane does not prove that route. "
         "The starting session does not relay reports. "
         "Only problem and FINAL notes (including UNKNOWN/time-limit stops) go to its inbox; never relay routine summaries."
-        if args.discord_channel else
+        if direct else
         "It queues the inbox row when delivery=inbox; the starting session relays each summary to the operator. "
         "When delivery=native it prints the summary for YOU to relay to your native parent.")
     brief = Template((PLUGIN / "templates/watcher-brief.md").read_text()).substitute(
@@ -122,6 +127,8 @@ def main():
     parser.add_argument("--board", required=True)
     parser.add_argument("--session", help="Exact starting Claude tmux session; implies inbox delivery")
     parser.add_argument("--discord-channel", help="Conditional direct Discord for --prepare-only; requires --session; detached launches use parent relay")
+    parser.add_argument("--discord-session", help="Like --discord-channel, but resolve this live session's channel per post "
+                        "(GET /discord/sessions/<name>/channel on the loopback relay); survives a re-created channel")
     parser.add_argument("--cards", nargs="+", action="extend")
     parser.add_argument("--every", type=float, default=900)
     parser.add_argument("--max-hours", type=float, default=12)

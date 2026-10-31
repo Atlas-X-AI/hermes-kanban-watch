@@ -40,7 +40,10 @@ if lint_dir:
 if sys.argv[2:] == ['--lint-only']:
     print('lint PASS')
     sys.exit(0)
-assert sys.argv[2:] == ['--channel', '123456789012345678']
+if os.environ.get('FAKE_DISCORD_ANY_CHANNEL'):
+    assert sys.argv[2] == '--channel' and re.fullmatch(r'[0-9]{1,20}', sys.argv[3]) and len(sys.argv) == 4
+else:
+    assert sys.argv[2:] == ['--channel', '123456789012345678']
 with Path(os.environ['DISCORD_CALLS']).open('a') as f:
     f.write(json.dumps({'text': text, 'args': sys.argv[2:]}) + '\\n')
 mode = os.environ.get('FAKE_DISCORD_MODE', 'ok')

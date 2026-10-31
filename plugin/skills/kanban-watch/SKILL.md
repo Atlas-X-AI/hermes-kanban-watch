@@ -25,16 +25,19 @@ Claude parent, resolve it in the PARENT pane with
 For a Claude Code parent:
 
 ```sh
-bash <plugin-root>/scripts/start_watcher.sh --prepare-only --board demo --session <exact-tmux-name> --discord-channel <channel-id> --every 900 --max-hours 12
+bash <plugin-root>/scripts/start_watcher.sh --prepare-only --board demo --session <exact-tmux-name> --discord-session <live-session-name> --every 900 --max-hours 12
 ```
 
-For an operator working in Discord, this is the default: supply their current
-session channel ID. The helper posts the 15-minute progress summaries and the FINAL
+For an operator working in Discord, this is the default: supply their live session
+name, never a frozen channel ID. The helper resolves the channel on the loopback relay
+(`GET /discord/sessions/<name>/channel`) for every post, so a channel re-created after a
+relay crash keeps working; a failed lookup posts nothing and reaches the starting session
+as a problem note. `--discord-channel <id>` still works for a fixed channel. The helper posts the 15-minute progress summaries and the FINAL
 note directly with `~/.claude/skills/messaging-hayden/bin/send-hayden.sh`; no model
 formats or sends those reports. Problems, time-limit stops and failed reads never go
 to the operator's channel: the starting session receives them (with FINAL) via
 `notify_session.py`, handles them itself, and does not relay reports.
-Omit `--discord-channel` when not working in Discord; all inbox/relay behaviour
+Omit both when not working in Discord; all inbox/relay behaviour
 then stays unchanged. The exact starting session supplies the source footer.
 
 Read the returned `brief` file and start ONE native background Agent of type
@@ -78,11 +81,14 @@ leases, state paths, diagnostics, native delivery and the exact reader commands.
 The deterministic wait polls every 60 seconds and wakes every 15 minutes for a
 summary, for a NEW problem, or completion. New problems do not postpone summaries.
 It flags blocked cards, ready over 10 minutes with no recorded worker, respawn
-guards, spawn failures, current parent questions and runs past their runtime cap.
-Actual models/providers come from runs, never from requested pins. Missing values
+guards, spawn failures, current parent questions, runs past their runtime cap and
+`model_drift`: a run that answered on a model other than its pin (`model_override`),
+or recorded a fallback, flagged in the first report after the worker's first model call.
+Cards marked SUPERSEDED (block reason or a comment since work last resumed) are not
+problems and not waiting. Actual models/providers come from runs, never from requested pins. Missing values
 and rough time left remain UNKNOWN; a runtime limit is not an ETA.
 
-With `--discord-channel`, the deterministic helper posts every report directly
+With `--discord-session` or `--discord-channel`, the deterministic helper posts every report directly
 and the starting session does not relay it. A failed send is UNKNOWN, not success;
 report the delivery problem to the starting session rather than posting again.
 Without it, the starting session relays EVERY summary, immediate problem and
