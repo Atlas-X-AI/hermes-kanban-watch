@@ -26,6 +26,41 @@ RECOVERY = {"claimed", "spawned", "unblocked", "completed", "archived"}
 READY_EVENTS = {"created", "promoted", "unblocked", "changes_requested", "reclaimed", "gave_up"}
 NOISE = {"heartbeat", "capped", "capped_alerted"}
 ASK = re.compile(r"^[ \t>#*_-]*ASK (?:PARENT|OPERATOR)[*_]*\s*:", re.I | re.M)
+# A parent's SUPERSEDED marker: the upper-case word anywhere, or any case at a line start.
+# Prose such as "not superseded yet" is not a marker.
+SUPERSEDED_WORD = re.compile(r"\bSUPERSEDED\b")
+SUPERSEDED_LEAD = re.compile(r"^[ \t>#*_-]*superseded\b", re.I | re.M)
+
+
+def marks_superseded(text):
+    return bool(text) and bool(SUPERSEDED_WORD.search(text) or SUPERSEDED_LEAD.search(text))
+
+
+def is_superseded(card, events, comments):
+    """SUPERSEDED in the block reason, the latest block event or a comment since work last
+    resumed retires a card from problem reporting; a later claim/spawn/unblock re-arms it."""
+    resumed = max((e["created_at"] for e in events if e["kind"] in RECOVERY), default=None)
+    texts = [c["body"] for c in comments if resumed is None or c["created_at"] > resumed]
+    if card["status"] == "blocked":
+        texts.append(card.get("block_reason"))
+        last = next((e for e in reversed(events) if e["kind"] in {"blocked", "gave_up"}), None)
+        if last and (resumed is None or last["created_at"] >= resumed):
+            texts += [payload(last).get("reason"), payload(last).get("block_reason")]
+    return any(isinstance(t, str) and marks_superseded(t) for t in texts)
+
+
+def model_drift(card, run):
+    """Pinned model vs the model the run answered on; None while the run model is UNKNOWN."""
+    used = (run or {}).get("model_used")
+    if not used:
+        return None
+    pinned = (card.get("model_override") or "").strip()
+    if pinned:
+        return f"Pinned to {pinned} but the run answered on {used}" if used.strip() != pinned else None
+    origin = ((run or {}).get("fallback_from") or "").strip()
+    if origin and origin != used.strip():
+        return f"Run fell back from {origin} to {used} (no pin recorded)"
+    return None
 
 
 def validate_scope(board, cards=None):
@@ -82,6 +117,7 @@ def snapshot(board, cards=None, now=None, home=None):
     path = board_path(board, home).resolve(strict=True)
     problems = []
     result = []
+    superseded = []
     with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=3)) as conn:
         conn.row_factory = sqlite3.Row
         conn.execute("pragma query_only=ON")
@@ -93,8 +129,10 @@ def snapshot(board, cards=None, now=None, home=None):
             raise ValueError("Unsupported board schema")
         if not {"id", "task_id", "kind", "created_at", "payload"} <= columns(conn, "task_events"):
             raise ValueError("Unsupported events schema")
+        has_comments = bool(columns(conn, "task_comments"))
         fields = [c for c in ("id", "title", "status", "assignee", "created_at", "started_at", "completed_at",
-                             "worker_pid", "current_run_id", "max_runtime_seconds", "block_reason") if c in task_cols]
+                             "worker_pid", "current_run_id", "max_runtime_seconds", "block_reason",
+                             "model_override") if c in task_cols]
         query = "select " + ",".join(fields) + " from tasks"
         if cards:
             query += " where id in (" + ",".join("?" for _ in cards) + ")"
@@ -108,7 +146,7 @@ def snapshot(board, cards=None, now=None, home=None):
             events = [dict(r) for r in conn.execute(
                 "select id,kind,payload,created_at from task_events where task_id=? order by id", (tid,))]
             run_fields = [c for c in ("id", "status", "started_at", "ended_at", "model_used", "provider_used",
-                                      "max_runtime_seconds", "summary") if c in run_cols]
+                                      "fallback_from", "max_runtime_seconds", "summary") if c in run_cols]
             run_query = "select " + ",".join(run_fields) + " from task_runs where task_id=?"
             pointer = card.get("current_run_id")
             params = (tid, pointer) if pointer is not None else (tid,)
@@ -131,6 +169,17 @@ def snapshot(board, cards=None, now=None, home=None):
                 key = hashlib.sha256(str(episode).encode()).hexdigest()[:16]
                 problems.append({"id": f"{tid}:{kind}:{key}", "card": tid, "kind": kind, "text": short(text)})
 
+            comments = [dict(r) for r in conn.execute(
+                "select id,body,created_at from task_comments where task_id=? order by id", (tid,))] if has_comments else []
+            if status not in FINAL and is_superseded(card, events, comments):
+                superseded.append(tid)
+                result.append(card)
+                continue
+            drift = model_drift(card, run)
+            if drift:
+                # Reported on first sight of the run's model, not at harvest; once per run and model.
+                problem("model_drift", drift, (run["id"], run.get("model_used")))
+
             if status not in FINAL:
                 if status == "blocked":
                     blocked = [e for e in events if e["kind"] in RECOVERY | {"blocked", "gave_up"}]
@@ -152,10 +201,9 @@ def snapshot(board, cards=None, now=None, home=None):
                     if not run or run["started_at"] <= e["created_at"]:
                         text = payload(e).get("reason") or (run_row["summary"] if run_row and "summary" in run_cols else None)
                         problem("parent_question", text or "Worker waiting on parent; no question recorded", e["id"])
-                if columns(conn, "task_comments"):
-                    comment = conn.execute("select id,body,created_at from task_comments where task_id=? order by id desc limit 1",
-                                           (tid,)).fetchone()
-                    if comment and ASK.search(comment["body"] or ""):
+                if comments:
+                    comment = comments[-1]
+                    if ASK.search(comment["body"] or ""):
                         recovered_after = any(e["kind"] in RECOVERY and e["created_at"] > comment["created_at"] for e in events)
                         if not recovered_after:
                             problem("parent_question", comment["body"], f"comment:{comment['id']}")
@@ -164,8 +212,14 @@ def snapshot(board, cards=None, now=None, home=None):
             result.append(card)
     counts = dict(sorted(Counter(c["status"] for c in result).items()))
     return {"read_status": "OK", "board": board, "now": now, "cards": result,
-            "counts": counts, "problems": problems, "all_terminal": bool(result) and all(c["status"] in FINAL for c in result),
+            "counts": counts, "problems": problems, "superseded": superseded, "all_terminal": bool(result) and all(c["status"] in FINAL for c in result),
             "rough_time_left_s": 0 if result and all(c["status"] in FINAL for c in result) else None}
+
+
+def waiting_count(data):
+    """Unfinished, not running and not SUPERSEDED: a retired card is not waiting on anyone."""
+    retired = set(data.get("superseded") or [])
+    return sum(1 for c in data["cards"] if c["status"] not in FINAL | {"running"} and c["id"] not in retired)
 
 
 def summary(data):
@@ -174,9 +228,11 @@ def summary(data):
     counts = data["counts"]
     done = sum(counts.get(s, 0) for s in FINAL)
     running = counts.get("running", 0)
-    waiting = len(data["cards"]) - done - running
+    retired = len(data.get("superseded") or [])
+    waiting = waiting_count(data)
     problems = data["problems"]
-    lines = [f"Kanban {data['board']}: done {done} / running {running} / waiting {waiting} / problems {len(problems)}",
+    lines = [f"Kanban {data['board']}: done {done} / running {running} / waiting {waiting} / problems {len(problems)}" +
+             (f" / superseded {retired}" if retired else ""),
              "rough time left " + ("0 (all watched cards terminal)" if data["all_terminal"] else "UNKNOWN (runtime limits are not estimates)")]
     for p in problems[:9]:
         lines.append(f"{p['card']} {p['kind']}: {short(p['text'])}")

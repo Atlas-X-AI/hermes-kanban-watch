@@ -31,6 +31,11 @@ bash scripts/start_watcher.sh --prepare-only --board demo --session exact-tmux-n
 ```
 
 Omit `--discord-channel` for the unchanged inbox-only parent relay.
+`--discord-session <live-session-name>` (instead of a fixed `--discord-channel`) resolves the
+channel for every post with `GET /discord/sessions/<name>/channel` on the loopback relay
+(`KANBAN_WATCH_DISCORD_RELAY`, default `http://127.0.0.1:3100`; loopback only), so a channel
+re-created after a relay crash is followed. A resolver failure posts nothing and is a
+problem note to the starting session (with the unposted summary); the next post resolves again.
 The JSON receipt names `brief`, `config` and the exact helper `command`. Give the
 brief to ONE background Sonnet Agent of type `hermes-kanban-watch:kanban-watcher`.
 This preparation starts no agent. For Claude Code, run `watcher_tick.py --config`
@@ -111,7 +116,8 @@ The reader does not invoke any board-mutation CLI.
 
 `--prepare-only --discord-channel <id>` requires `--session` for the exact
 starting session, validates a numeric channel ID, and stores `discord_channel`
-in the watcher config. Preparation starts no sender and cannot validate a future
+in the watcher config (`--discord-session <name>` stores `discord_session` and resolves the
+channel per post instead; the two are exclusive). Preparation starts no sender and cannot validate a future
 native child's ancestry. Only use this route where the normal sender can truthfully
 verify identity in the helper's actual execution context. Otherwise omit the option
 and use parent relay. A parent's valid pane, inherited environment or native-agent

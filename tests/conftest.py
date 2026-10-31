@@ -24,6 +24,8 @@ def isolated_home(tmp_path, monkeypatch):
         monkeypatch.setenv(f"XDG_{kind}_HOME", str(tmp_path / f"xdg-{kind.lower()}"))
     # A test must explicitly install its fake sender; never inherit an outbound route.
     monkeypatch.setenv("KANBAN_WATCH_DISCORD_SENDER", str(home / "no-discord-sender"))
+    # Never reach a real loopback relay: port 9 (discard) refuses; tests install a fake relay.
+    monkeypatch.setenv("KANBAN_WATCH_DISCORD_RELAY", "http://127.0.0.1:9")
     for name in tuple(os.environ):
         if name.startswith("HERMES_KANBAN_") or name == "KANBAN_WATCH_ROUTES":
             monkeypatch.delenv(name, raising=False)

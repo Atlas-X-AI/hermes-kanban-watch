@@ -14,8 +14,9 @@ import sqlite3
 import subprocess
 import sys
 import time
+from urllib import error as urlerror, parse as urlparse, request as urlrequest
 
-from board_watch import atomic_json, short, summary, wait
+from board_watch import atomic_json, short, summary, wait, waiting_count
 from notify_session import notify
 
 
@@ -81,7 +82,7 @@ def discord_draft(wake, session):
         counts = data["counts"]
         done = counts.get("done", 0) + counts.get("archived", 0)
         running = counts.get("running", 0)
-        waiting = len(data["cards"]) - done - running
+        waiting = waiting_count(data)  # A SUPERSEDED card is not waiting on anyone.
         # Progress and the final note only: problems are the starting session's to handle
         # (operator ruling, 2026-10-26: progress and results only).
         final = reason == "final"
@@ -100,7 +101,51 @@ class DiscordDeliveryError(ValueError):
         super().__init__(f"Discord delivery UNKNOWN ({kind}; sender exit {exit_code})")
 
 
-def send_discord(config, wake):
+class ChannelUnresolved(ValueError):
+    """The session's channel could not be resolved; nothing was sent, so a later post may retry."""
+
+    def __init__(self, kind):
+        self.kind = kind
+        super().__init__(kind)
+
+
+SESSION_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}")
+LOOPBACK = {"127.0.0.1", "localhost", "::1"}
+
+
+def resolve_channel(config):
+    """A fixed --discord-channel, or the session's live channel resolved now, for THIS post.
+
+    A channel re-created after a relay crash gets a new id; resolving per post follows it.
+    """
+    if config.get("discord_channel"):
+        return config["discord_channel"]
+    session = config.get("discord_session")
+    if not isinstance(session, str) or not SESSION_NAME.fullmatch(session):
+        raise ChannelUnresolved("bad_session")
+    base = os.environ.get("KANBAN_WATCH_DISCORD_RELAY") or "http://127.0.0.1:3100"
+    parts = urlparse.urlsplit(base)
+    if parts.scheme != "http" or parts.hostname not in LOOPBACK:
+        raise ChannelUnresolved("relay_not_loopback")  # The session name never leaves the host.
+    url = base.rstrip("/") + "/discord/sessions/" + urlparse.quote(session, safe="") + "/channel"
+    opener = urlrequest.build_opener(urlrequest.ProxyHandler({}))  # Loopback only: never via a proxy.
+    try:
+        with opener.open(url, timeout=10) as response:
+            body = json.loads(response.read(65536).decode("utf-8"))
+    except urlerror.HTTPError as exc:
+        raise ChannelUnresolved(f"http_{exc.code}") from None
+    except (urlerror.URLError, OSError):
+        raise ChannelUnresolved("relay_unreachable") from None
+    except (UnicodeDecodeError, ValueError):
+        raise ChannelUnresolved("bad_channel") from None
+    channel = body.get("channelId") if isinstance(body, dict) else None
+    channel = str(channel) if isinstance(channel, (str, int)) and not isinstance(channel, bool) else ""
+    if not re.fullmatch(r"[0-9]{1,20}", channel):
+        raise ChannelUnresolved("bad_channel")
+    return channel
+
+
+def send_discord(config, wake, channel):
     draft = Path(config["relay_state"]).with_name("discord-draft.md")
     draft.write_text(discord_draft(wake, config["session"]), encoding="utf-8")
     sender = os.environ.get("KANBAN_WATCH_DISCORD_SENDER") or str(
@@ -108,7 +153,7 @@ def send_discord(config, wake):
     # The normal sender checks identity in THIS process context, not the parent's
     # resolved pane. Never pass a service identity or borrow the starting session's.
     try:
-        result = subprocess.run([sender, str(draft), "--channel", config["discord_channel"]],
+        result = subprocess.run([sender, str(draft), "--channel", channel],
                                 capture_output=True, text=True, timeout=45)
     except subprocess.TimeoutExpired:
         raise DiscordDeliveryError("sender_timeout") from None
@@ -122,7 +167,7 @@ def send_discord(config, wake):
     receipt = re.fullmatch(r"ok ([0-9]+) reactions=0/0", lines[-1]) if lines else None
     if not receipt:
         raise DiscordDeliveryError("receipt_missing", result.returncode)
-    return {"message_id": receipt[1], "channel": config["discord_channel"]}
+    return {"message_id": receipt[1], "channel": channel}
 
 
 def relay_tick(config):
@@ -131,8 +176,9 @@ def relay_tick(config):
     if relay.get("stopped"):
         print("STOP " + relay["stopped"])
         return 0
+    discord = bool(config.get("discord_channel") or config.get("discord_session"))
     if ("discord_failure" in relay or
-            (config.get("discord_channel") and relay.get("pending") and not relay.get("discord_receipt"))):
+            (discord and relay.get("pending") and not relay.get("discord_receipt"))):
         # A pending event from an interrupted/older helper cannot prove no send
         # occurred, even when it predates structured failure records.
         raise ValueError("Discord delivery UNKNOWN; pending event retained; reconciliation required, no retry")
@@ -154,19 +200,35 @@ def relay_tick(config):
     text = prefix + text
     # Stable pending event + notification key make a retry after an interrupted
     # inbox write idempotent. Never advance the delivery cursor on a failed send.
-    discord = bool(config.get("discord_channel"))
     key = f"kanban-watch:{config['launch_id']}:{relay['sequence']}"
     # Discord carries the 15-minute progress and the final note only. A problem between
     # summaries, a time-limit stop or a failed read reaches only the starting session.
     to_discord = discord and (reason == "final" or bool(wake.get("summary_due")))
     with owned_lease(config):
+        channel = None
         if to_discord and not relay.get("discord_receipt"):
+            try:
+                channel = resolve_channel(config)
+            except ChannelUnresolved as exc:
+                # Known not sent: report it to the starting session (never drop it, never guess a
+                # channel) and keep watching; the next post resolves again.
+                note = (f"problem: Discord channel for session {config.get('discord_session')} unresolved "
+                        f"({exc.kind}); this {reason} report was not posted to Discord. "
+                        "The next post resolves the channel again.")
+                if reason == "summary":
+                    note += "\n" + text  # Summaries otherwise reach only Discord.
+                relay["last_channel_failure"] = exc.kind
+                if config["delivery"] == "inbox":
+                    notify(config["session"], note, key + ":channel-unresolved")
+                else:
+                    print(note)
+        if channel:
             # Fail closed across a crash during the external call too. A verified
             # receipt clears this marker; an incomplete attempt is never retried.
             relay["discord_failure"] = {"kind": "attempt_incomplete", "exit_code": None}
             atomic_json(relay_path, relay)
             try:
-                relay["discord_receipt"] = send_discord(config, wake)
+                relay["discord_receipt"] = send_discord(config, wake, channel)
                 relay.pop("discord_failure")
                 # If the inbox fails next, an authorised retry must not repost.
                 atomic_json(relay_path, relay)
