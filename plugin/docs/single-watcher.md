@@ -173,6 +173,9 @@ Tests inject `KANBAN_WATCH_DISCORD_SENDER` with an absolute fake executable; it 
 never set from card text. They exercise its `--lint-only` mode without a real
 send. Set `KANBAN_WATCH_FORMAT_LINT_DIR` to a checkout of `astra-context-layer`
 to also run its real `format-lint --check --text-file` on each fake-send draft.
+The same lint also checks the draft for every wake reason (summary, problem,
+max_hours, final, UNKNOWN); without it, a mirror of its operator-action rule
+(an action verb or exactly "Nothing needed") still runs on each of them.
 No real Discord or live inbox is used by tests.
 
 ## Delivery and local state
