@@ -75,9 +75,11 @@ def discord_draft(wake, session):
     if not isinstance(session, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", session):
         raise ValueError("Discord needs the exact starting session name")
     data, reason = wake["snapshot"], wake["reason"]
+    # The sender's lint refuses a draft without an action line that starts with an operator
+    # verb or reads exactly "Nothing needed", so every draft ends with one (issue #12).
     if data.get("read_status") != "OK":
         lines = ["🟠 Kanban read status UNKNOWN; progress cannot be verified.",
-                 "🟠 The starting session needs to investigate; completion is UNKNOWN."]
+                 "🟠 Open the starting session to check the board; completion is UNKNOWN."]
     else:
         counts = data["counts"]
         done = counts.get("done", 0) + counts.get("archived", 0)
@@ -85,11 +87,15 @@ def discord_draft(wake, session):
         waiting = waiting_count(data)  # A SUPERSEDED card is not waiting on anyone.
         # Progress and the final note only: problems are the starting session's to handle
         # (operator ruling, 2026-10-26: progress and results only).
-        final = reason == "final"
-        lines = ["🟢 FINAL: All watched work is finished." if final else "🟣 Kanban progress update.",
-                 f"🟢 Done: {done}", f"🟣 Running: {running}", f"🟡 Waiting: {waiting}",
-                 "🟢 Rough time left: 0." if final else "🟡 Rough time left: UNKNOWN.",
-                 "🟢 Nothing needed." if final else "🟣 Work continues; nothing needed."]
+        final, stopped = reason == "final", reason == "max_hours"
+        head = ("🟢 FINAL: All watched work is finished." if final else
+                "🟠 Kanban watch stopped at its time limit; work is not finished." if stopped else
+                "🟣 Kanban progress update.")
+        action = (["🟢 Nothing needed."] if final else
+                  ["🟠 Open the starting session to restart the watch if work remains."] if stopped else
+                  ["🟣 Work continues.", "🟢 Nothing needed."])
+        lines = [head, f"🟢 Done: {done}", f"🟣 Running: {running}", f"🟡 Waiting: {waiting}",
+                 "🟢 Rough time left: 0." if final else "🟡 Rough time left: UNKNOWN.", *action]
     return "\n".join([*lines, f"-# Source: {session}"])
 
 

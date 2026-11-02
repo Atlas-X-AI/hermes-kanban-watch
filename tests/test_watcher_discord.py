@@ -1,4 +1,5 @@
 """Direct delivery proofs: fake sender, temporary board and temporary inbox only."""
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -227,6 +228,135 @@ def test_unknown_read_and_time_limit_are_not_done(discord_env, board, reason):
     assert not calls.exists()
     rows = inbox_texts(inbox)
     assert len(rows) == 1 and "FINAL" not in rows[0]
+
+
+# The sender's format-lint `operator-action` rule, mirrored so CI without that module still
+# catches a draft that states no action (issue #12): one content line must read exactly
+# "Nothing needed" or start with a direct operator verb. Conservative on purpose: it omits the
+# real rule's addressed-name and choice-request exemptions, which no watcher draft uses.
+OPERATOR_VERBS = (r"reply|tap|choose|approve|authori[sz]e|review|confirm|send|upload|open|"
+                  r"sign|pay|complete|enter|provide|answer|pick|select|decide|click|react")
+OPERATOR_ACTION = re.compile(
+    rf"^(?:please\s+)?(?:{OPERATOR_VERBS})\b|^tell\s+me\b|^let\s+me\s+know\b|"
+    rf"\b(?:you\s+(?:need|have|will\s+need)\s+to|I\s+need\s+you\s+to)\s+(?:{OPERATOR_VERBS})\b",
+    re.IGNORECASE)
+# (action line, passes the rule). Lines from released drafts keep the mirror honest.
+OPERATOR_ACTION_CASES = [
+    ("🟢 Nothing needed.", True),                     # 0.4.2 final note: posted.
+    ("🟣 Work continues; nothing needed.", False),    # 0.4.2 summary: refused (issue #12).
+    ("🟠 The starting session needs to investigate; completion is UNKNOWN.", False),  # 0.4.1 problem.
+    ("🟣 Work continues.", False),
+    ("🟠 Open the starting session to check the board.", True),
+    ("🟡 Reply here to restart the watch.", True),
+]
+DRAFT_REASONS = ["summary", "problem", "max_hours", "final", "UNKNOWN"]
+
+
+def states_operator_action(draft):
+    content = [re.sub(f"^[{MARKERS}]\\s*", "", line).strip() for line in draft.splitlines()
+               if line.strip() and not line.startswith("-# Source: ")]
+    return any(re.fullmatch(r"Nothing needed[.!]?", line) or OPERATOR_ACTION.search(line)
+               for line in content)
+
+
+def fixture_draft(action_line):
+    return f"🟣 Kanban progress update.\n{action_line}\n-# Source: desk"
+
+
+def format_lint_root():
+    """The real lint: KANBAN_WATCH_FORMAT_LINT_DIR, else an importable module; None skips."""
+    configured = os.environ.get("KANBAN_WATCH_FORMAT_LINT_DIR")
+    if configured:
+        return Path(configured)
+    spec = importlib.util.find_spec("astra_context_layer")
+    return Path(spec.origin).parent.parent if spec and spec.origin else None
+
+
+@pytest.fixture
+def format_lint(tmp_path):
+    root = format_lint_root()
+    if root is None:
+        pytest.skip("format-lint UNKNOWN: astra_context_layer is not importable here and "
+                    "KANBAN_WATCH_FORMAT_LINT_DIR is unset; the operator-action mirror still runs")
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(
+        filter(None, [str(root), os.environ.get("PYTHONPATH")]))}
+    probe = subprocess.run([sys.executable, "-c", "import astra_context_layer"], cwd=root, env=env,
+                           capture_output=True, text=True, timeout=10)
+    # An explicitly configured lint that cannot import is a broken run, never a skip.
+    assert probe.returncode == 0, f"format-lint at {root} is not importable: {probe.stderr}"
+
+    def run(text, name="draft.md"):
+        draft = tmp_path / name
+        draft.write_text(text, encoding="utf-8")
+        result = subprocess.run([sys.executable, "-m", "astra_context_layer", "format-lint",
+                                 "--check", "--text-file", str(draft)], cwd=root, env=env,
+                                capture_output=True, text=True, timeout=15)
+        verdict = json.loads(result.stdout)
+        assert result.returncode == (0 if verdict["ok"] else 1), result.stderr
+        return verdict
+    return run
+
+
+def render_draft(reason, board, monkeypatch):
+    """discord_draft for one wake reason, from a real snapshot of the disposable board."""
+    monkeypatch.syspath_prepend(str(PLUGIN / "scripts"))
+    import board_watch
+    import watcher_tick
+    with sqlite3.connect(board) as conn:
+        conn.execute("update tasks set title='PRIVATE-CARD-TITLE @everyone'")
+        if reason == "problem":
+            conn.execute("update tasks set status='blocked' where id='t_wait'")
+        if reason == "final":
+            conn.execute("update tasks set status='done'")
+    if reason == "UNKNOWN":
+        board.write_bytes(b"broken")
+        with pytest.raises((OSError, ValueError, sqlite3.Error)) as caught:
+            board_watch.snapshot("demo")
+        # Exactly the wake relay_tick builds on a failed read.
+        wake = {"reason": reason, "snapshot": {"read_status": "UNKNOWN",
+                                               "error": board_watch.short(caught.value)}}
+    else:
+        data = board_watch.snapshot("demo")
+        assert data["read_status"] == "OK" and {c["id"] for c in data["cards"]} == {
+            "t_run", "t_wait", "t_done"}
+        assert data["all_terminal"] == (reason == "final")
+        assert bool(data["problems"]) == (reason == "problem")
+        # A summary-due wake is how summary, problem and max_hours reach Discord at all.
+        wake = {"reason": reason, "snapshot": data, "new_problems": data["problems"],
+                "summary_due": reason != "final"}
+    draft = watcher_tick.discord_draft(wake, "desk")
+    lines = draft.splitlines()
+    # The sender's shape: at most eight lines, one state marker each, the source footer last.
+    assert 3 <= len(lines) <= 8 and lines[-1] == "-# Source: desk"
+    assert all(sum(line.count(mark) for mark in MARKERS) == 1 and line[0] in MARKERS
+               for line in lines[:-1])
+    # Counts and fixed prose only: no card id, title or problem text reaches a human channel.
+    assert not re.search(r"t_run|t_wait|t_done|PRIVATE-CARD-TITLE|@everyone|block reason", draft)
+    return draft
+
+
+@pytest.mark.parametrize("line,passes", OPERATOR_ACTION_CASES)
+def test_operator_action_mirror_fixtures(line, passes):
+    assert states_operator_action(fixture_draft(line)) is passes
+
+
+@pytest.mark.parametrize("line,passes", OPERATOR_ACTION_CASES)
+def test_operator_action_mirror_agrees_with_real_lint(format_lint, line, passes):
+    codes = [v["code"] for v in format_lint(fixture_draft(line))["violations"]]
+    assert ("operator-action" not in codes) is passes, codes
+
+
+@pytest.mark.parametrize("reason", DRAFT_REASONS)
+def test_every_discord_draft_states_an_operator_action(board, monkeypatch, reason):
+    draft = render_draft(reason, board, monkeypatch)
+    assert states_operator_action(draft), draft
+
+
+@pytest.mark.parametrize("reason", DRAFT_REASONS)
+def test_every_discord_draft_passes_real_format_lint(board, monkeypatch, format_lint, reason):
+    draft = render_draft(reason, board, monkeypatch)
+    verdict = format_lint(draft, f"{reason}.md")
+    assert verdict["ok"] is True and verdict["violations"] == [], (draft, verdict["violations"])
 
 
 @pytest.mark.parametrize("channel", ["", "../bad", "1;exit", "@everyone"])

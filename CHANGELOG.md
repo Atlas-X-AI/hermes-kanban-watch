@@ -1,7 +1,15 @@
 # Changelog
 
-## Unreleased
+## 0.4.3
 
+- Every direct-Discord draft now passes the sender's operator-action lint, so the
+  15-minute progress summaries post instead of stopping the watcher with "Discord
+  delivery UNKNOWN". A summary ends `Work continues.` then `Nothing needed.`; a
+  time-limit stop says the watch stopped before the work finished and to open the
+  starting session to restart it; a failed read says to open the starting session
+  to check the board. Still counts and fixed prose only, never card text. A test
+  renders every wake reason through the real lint when it is importable, and a
+  mirror of its operator-action rule runs everywhere else. Closes #12.
 - Flag `model_drift` on first sight: a run whose `model_used` differs from the card's
   pin (`model_override`), or that recorded `fallback_from` without a pin, is an immediate
   problem note to the starting session, not a harvest-time surprise.
