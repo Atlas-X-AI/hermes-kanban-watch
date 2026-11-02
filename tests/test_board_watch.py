@@ -85,6 +85,8 @@ def test_live_cap_is_reported_not_a_problem(board, reader, alerted):
     with sqlite3.connect(board) as conn:
         conn.execute("insert into tasks values('t_uncapped','Waiting','builder','ready',?,null,null,null,null,null)",
                      (now - 900,))
+        conn.execute("insert into tasks values('t_holder','Holder','builder','running',?,null,null,null,null,null)",
+                     (now - 100,))
     event(board, "t_wait", "promoted", now - 900)
     event(board, "t_wait", "capped", now - 840,
           {"scope": "group:builders", "assignee": "builder", "running": 2, "cap": 2})
@@ -132,6 +134,34 @@ def test_live_cap_does_not_hide_spawn_failures(board, reader):
     data = reader.snapshot("demo", ["t_wait"], now=now)
     assert data["capped"] == 1
     assert [p["kind"] for p in data["problems"]] == ["spawn_failed"]
+
+
+@pytest.mark.parametrize("holders", [0, 1])
+def test_abandoned_cap_cannot_hide_a_stalled_ready_card(board, reader, holders):
+    now = int(time.time()) + 30000
+    with sqlite3.connect(board) as conn:
+        conn.execute("update tasks set status=? where id='t_run'", ("running" if holders else "done",))
+    event(board, "t_wait", "promoted", now - 22000)
+    event(board, "t_wait", "capped", now - 21600,
+          {"assignee": "builder", "running": 2, "cap": 2})
+    before = board.read_bytes()
+    data = reader.snapshot("demo", ["t_wait"], now=now)
+    assert data["capped"] == 0
+    assert not data["cards"][0].get("capped")
+    assert [p["kind"] for p in data["problems"]] == ["ready_no_worker"]
+    assert board.read_bytes() == before
+
+
+def test_unrelated_running_card_is_not_a_cap_holder(board, reader):
+    now = int(time.time()) + 1000
+    with sqlite3.connect(board) as conn:
+        conn.execute("update tasks set assignee='other' where id='t_run'")
+    event(board, "t_wait", "promoted", now - 900)
+    event(board, "t_wait", "capped", now - 800,
+          {"assignee": "builder", "running": 1, "cap": 1})
+    data = reader.snapshot("demo", ["t_wait"], now=now)
+    assert data["capped"] == 0
+    assert [p["kind"] for p in data["problems"]] == ["ready_no_worker"]
 
 
 def test_ready_worker_evidence_and_current_run_pointer(board, reader):

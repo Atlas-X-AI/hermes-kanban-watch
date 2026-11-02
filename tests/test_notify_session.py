@@ -1,6 +1,7 @@
 """Real inbox SQL, fake tmux plus one owned-server contract test, no live delivery."""
 import json
 import os
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -30,6 +31,8 @@ if sys.argv[1:] != ['list-panes', '-s', '-t', '=desk:', '-F', '#{pane_id} #{pane
 print(os.environ.get('TMUX_PANES', '%42 4200'))
 ''')
     tmux.chmod(0o755)
+    from pane_processes import install_ps
+    install_ps(bindir)
     monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ["PATH"])
     monkeypatch.setenv("TMUX_CALLS", str(tmp_path / "tmux-calls"))
     text = tmp_path / "text.txt"
@@ -137,44 +140,99 @@ def test_dedupe_replays_do_not_insert_twice(inbox):
         assert conn.execute("select count(*) from messages").fetchone()[0] == 1
 
 
-def test_real_tmux_exact_session_contract_in_owned_server(inbox, tmp_path):
-    """Outside the fake: prove exact/pane targets on a separate temporary server."""
+@pytest.mark.parametrize("processes", [
+    "4200 1 Mon Nov 2 08:00:00 2026 zsh S\n4201 4200 Mon Nov 2 08:01:00 2026 claude Z",
+    "4200 1 Mon Nov 2 08:00:00 2026 zsh S\n4201 4200 Mon Nov 2 08:01:00 2026 claude X",
+    "4200 1 Mon Nov 2 08:00:00 2026 zsh S\n4201 4200 Mon Nov 2 08:01:00 2026 node S",
+    "4201 4202 Mon Nov 2 08:01:00 2026 claude S\n4202 4201 Mon Nov 2 08:01:00 2026 zsh S",
+    "unreadable process output",
+])
+def test_dead_unknown_or_unreadable_agents_never_open_inbox(inbox, monkeypatch, processes):
+    db, text = inbox
+    monkeypatch.setenv("PANE_PROCESSES", processes)
+    before = db.read_bytes()
+    assert notify(text).returncode != 0
+    assert db.read_bytes() == before
+
+
+def test_agent_ancestry_can_include_intermediate_shells(inbox, monkeypatch):
+    _, text = inbox
+    monkeypatch.setenv("PANE_PROCESSES", "4200 1 Mon Nov 2 08:00:00 2026 zsh S\n"
+                       "4202 4200 Mon Nov 2 08:00:01 2026 bash S\n"
+                       "4201 4202 Mon Nov 2 08:01:00 2026 claude S")
+    assert notify(text, "desk", "--agent-pid", "4201", "--agent-start", "Mon Nov 2 08:01:00 2026").returncode == 0
+
+
+def test_real_tmux_exact_session_contract_in_owned_server(inbox, tmp_path, monkeypatch):
+    """Real ps ancestry and exact tmux targets, on a separate temporary server."""
+    import time
+
     real_tmux = shutil.which("tmux", path=os.defpath)
-    if real_tmux is None:
-        pytest.skip("tmux not installed")
+    real_ps = shutil.which("ps", path=os.defpath)
+    if real_tmux is None or real_ps is None or sys.platform != "linux":
+        pytest.skip("Linux, tmux and ps required for the owned-process contract")
     db, text = inbox
     socket = tmp_path / "tmux.sock"
     base = [real_tmux, "-S", str(socket)]
-    created = subprocess.run([*base, "-f", "/dev/null", "new-session", "-d", "-s", "desk", "sleep 60"],
+    ready, stop = tmp_path / "ready", tmp_path / "stop"
+    agent = tmp_path / "agent.py"
+    agent.write_text("import ctypes, time\nfrom pathlib import Path\n"
+                     "assert ctypes.CDLL(None).prctl(15, b'claude', 0, 0, 0) == 0\n" +
+                     f"Path({str(ready)!r}).touch()\n" +
+                     "deadline = time.monotonic() + 60\n" +
+                     f"while not Path({str(stop)!r}).exists() and time.monotonic() < deadline:\n"
+                     "    time.sleep(0.01)\n")
+    shell_command = f"{shlex.quote(sys.executable)} {shlex.quote(str(agent))}; sleep 60"
+    created = subprocess.run([*base, "-f", "/dev/null", "new-session", "-d", "-s", "desk", shell_command],
                              capture_output=True, text=True, timeout=5)
     assert created.returncode == 0, created.stderr
     try:
         wrapper = tmp_path / "bin/tmux"
         wrapper.write_text(f"#!{sys.executable}\n" +
                            f"import os, sys\nos.execv({real_tmux!r}, {base!r} + sys.argv[1:])\n")
-        out = notify(text)
+        (tmp_path / "bin/ps").write_text(f"#!{sys.executable}\n" +
+                                       f"import os, sys\nos.execv({real_ps!r}, [{real_ps!r}] + sys.argv[1:])\n")
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists(), "owned agent did not become ready"
+        monkeypatch.syspath_prepend(str(PLUGIN / "scripts"))
+        from notify_session import resolve_agent, resolve_pane
+        parent_pane, pane_pid = resolve_pane("desk")
+        agent_pid, agent_start = resolve_agent(pane_pid)
+        assert agent_pid != pane_pid  # This is the agent inside the surviving shell.
+        binding = ["--pane", parent_pane, "--pane-pid", str(pane_pid),
+                   "--agent-pid", str(agent_pid), "--agent-start", agent_start]
+        out = notify(text, "desk", *binding)
         assert out.returncode == 0, out.stderr
         receipt = json.loads(out.stdout)
         pane = subprocess.run([*base, "display-message", "-p", "-t", receipt["notify_target"], "#{pane_id}"],
                               capture_output=True, text=True, timeout=5)
-        assert pane.returncode == 0 and pane.stdout.strip().startswith("%")
-        assert receipt["notify_target"] == "=desk:." + pane.stdout.strip()
-        parent_pane = pane.stdout.strip()
-        # A second, active window must neither become the destination nor make the
-        # recorded target invalid. This server has its own temporary socket.
+        assert pane.returncode == 0 and pane.stdout.strip() == parent_pane
+        assert receipt["notify_target"] == "=desk:." + parent_pane
         other = subprocess.run([*base, "new-window", "-t", "desk:", "sleep 60"],
                                capture_output=True, text=True, timeout=5)
         assert other.returncode == 0, other.stderr
-        shared = notify(text, "desk", "--pane", parent_pane)
+        shared = notify(text, "desk", *binding)
         assert shared.returncode == 0, shared.stderr
-        target = json.loads(shared.stdout)["notify_target"]
-        resolved = subprocess.run([*base, "display-message", "-p", "-t", target, "#{pane_id}"],
-                                  capture_output=True, text=True, timeout=5)
-        assert resolved.returncode == 0 and resolved.stdout.strip() == parent_pane
+        assert json.loads(shared.stdout)["notify_target"] == receipt["notify_target"]
         before = db.read_bytes()
         assert notify(text).returncode != 0  # No active-window fallback in a shared session.
         assert db.read_bytes() == before
         assert notify(text, "des").returncode != 0
+        assert db.read_bytes() == before
+        stop.touch()  # Only the owned temporary agent observes this file.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                resolve_agent(pane_pid, agent_pid, agent_start)
+            except ValueError:
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("owned agent did not exit")
+        assert resolve_pane("desk", parent_pane)[1] == pane_pid
+        assert notify(text, "desk", *binding).returncode != 0
         assert db.read_bytes() == before
     finally:
         subprocess.run([*base, "kill-server"], capture_output=True, timeout=5, check=True)

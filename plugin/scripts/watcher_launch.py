@@ -18,7 +18,7 @@ import time
 import uuid
 
 from board_watch import atomic_json, board_path, positive, snapshot, validate_scope
-from notify_session import resolve_pane
+from notify_session import resolve_agent, resolve_pane
 from watcher_tick import SESSION_NAME, lease_lock, read_lease, release_lease
 
 PLUGIN = Path(__file__).resolve().parents[1]
@@ -52,10 +52,11 @@ def launch(args):
         # Resolving the parent pane is not proof of the future helper's sender identity.
     if delivery == "inbox" and not args.session:
         raise ValueError("--session is required for inbox delivery")
-    pane = pane_pid = None
+    pane = pane_pid = agent_pid = agent_start = None
     if delivery == "inbox" or direct:
         requested_pane = args.pane if args.pane is not None else os.environ.get("TMUX_PANE")
-        pane, pane_pid = resolve_pane(args.session, requested_pane)
+        pane, pane_pid = resolve_pane(args.session, requested_pane, fallback_single=args.pane is None)
+        agent_pid, agent_start = resolve_agent(pane_pid)
     if not args.prepare_only and delivery == "native":
         raise ValueError("Native delivery requires --prepare-only, then launch the brief in ONE native agent")
     board_home = Path(args.home or os.environ.get("HERMES_HOME", Path.home() / ".hermes")).expanduser().resolve()
@@ -75,7 +76,7 @@ def launch(args):
     seconds = hours * 3600
     config = {"board": args.board, "cards": args.cards, "board_home": str(board_home), "every": every,
               "until": time.time() + seconds, "session": args.session, "delivery": delivery, "launch_id": launch_id,
-              "pane": pane, "pane_pid": pane_pid,
+              "pane": pane, "pane_pid": pane_pid, "agent_pid": agent_pid, "agent_start": agent_start,
               "discord_channel": args.discord_channel, "discord_session": args.discord_session,
               "cursor": str(directory / "cursor.json"), "relay_state": str(directory / "relay.json"),
               "lease": str(root / "leases" / f"{args.board}.json")}

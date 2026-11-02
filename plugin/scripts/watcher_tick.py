@@ -179,9 +179,11 @@ def send_discord(config, wake, channel):
 def notify_parent(config, text, key):
     """Prepared inbox routes must never rediscover a target, even for error notes."""
     pane, pane_pid = config.get("pane"), config.get("pane_pid")
-    if pane is None or pane_pid is None:
-        raise ValueError("Inbox config has no recorded pane identity; prepare a new watcher")
-    return notify(config["session"], text, key, pane=pane, pane_pid=pane_pid)
+    agent_pid, agent_start = config.get("agent_pid"), config.get("agent_start")
+    if pane is None or pane_pid is None or agent_pid is None or agent_start is None:
+        raise ValueError("Inbox config has no recorded pane/agent identity; prepare a new watcher")
+    return notify(config["session"], text, key, pane=pane, pane_pid=pane_pid,
+                  agent_pid=agent_pid, agent_start=agent_start)
 
 
 def relay_tick(config):

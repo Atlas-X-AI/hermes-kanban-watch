@@ -40,6 +40,8 @@ except FileExistsError:
         path = bindir / name
         path.write_text(f"#!{sys.executable}\n" + content)
         path.chmod(0o755)
+    from pane_processes import install_ps
+    install_ps(bindir)
     log = tmp_path / "unit-calls"
     monkeypatch.delenv("TMUX_PANE", raising=False)
     monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ["PATH"])

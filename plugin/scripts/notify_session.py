@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 from contextlib import closing
 import json
+import os
 from pathlib import Path
 import re
 import sqlite3
@@ -17,7 +18,7 @@ import sys
 import uuid
 
 
-def resolve_pane(session, pane=None, pane_pid=None):
+def resolve_pane(session, pane=None, pane_pid=None, *, fallback_single=False):
     """Return an exact (pane ID, pane process ID), never the active window's pane."""
     if not isinstance(session, str) or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,199}", session):
         raise ValueError("Invalid exact tmux session name")
@@ -34,6 +35,8 @@ def resolve_pane(session, pane=None, pane_pid=None):
         raise ValueError("Session missing or panes unreadable; nothing queued")
     panes = [line.split() for line in lines]
     matches = [row for row in panes if pane is None or row[0] == pane]
+    if not matches and fallback_single and pane_pid is None and len(panes) == 1:
+        matches = panes
     if len(matches) != 1:
         raise ValueError("Recorded pane missing or target ambiguous; supply --pane or TMUX_PANE at prepare time; nothing queued")
     found, pid = matches[0][0], int(matches[0][1])
@@ -42,10 +45,54 @@ def resolve_pane(session, pane=None, pane_pid=None):
     return found, pid
 
 
-def notify(session, text, key=None, database=None, *, pane=None, pane_pid=None):
+def resolve_agent(pane_pid, agent_pid=None, agent_start=None):
+    """Find one Claude process by ancestry, not the pane's long-lived shell.
+
+    Read process names only, never command arguments or environment. Unknown
+    runtimes and ambiguous trees refuse rather than treating a shell as an agent.
+    """
+    if (agent_pid is None) != (agent_start is None) or (agent_pid is not None and (
+            type(agent_pid) is not int or agent_pid <= 0 or not isinstance(agent_start, str) or not agent_start)):
+        raise ValueError("Invalid recorded agent identity")
+    result = subprocess.run(["ps", "-eo", "pid=,ppid=,lstart=,comm=,stat="],
+                            capture_output=True, text=True, timeout=10, env={**os.environ, "LC_ALL": "C"})
+    if result.returncode:
+        raise ValueError("Agent process tree unreadable; nothing queued")
+    processes = {}
+    for line in result.stdout.splitlines():
+        fields = line.split(None, 8)
+        if len(fields) != 9 or not fields[0].isdigit() or not fields[1].isdigit():
+            raise ValueError("Agent process tree unreadable; nothing queued")
+        pid, parent = int(fields[0]), int(fields[1])
+        if pid in processes:
+            raise ValueError("Agent process tree ambiguous; nothing queued")
+        processes[pid] = (parent, " ".join(fields[2:7]), fields[7], fields[8])
+
+    def in_pane(pid):
+        seen = set()
+        while pid in processes and pid not in seen:
+            if pid == pane_pid:
+                return True
+            seen.add(pid)
+            pid = processes[pid][0]
+        return False
+
+    agents = [(pid, row[1]) for pid, row in processes.items()
+              if Path(row[2]).name == "claude" and row[3][:1] not in {"Z", "X"} and in_pane(pid)]
+    if len(agents) != 1:
+        raise ValueError("Pane has no unique Claude agent process; nothing queued")
+    found, started = agents[0]
+    if agent_pid is not None and (found != agent_pid or started != agent_start):
+        raise ValueError("Recorded agent process changed; nothing queued")
+    return found, started
+
+
+def notify(session, text, key=None, database=None, *, pane=None, pane_pid=None,
+           agent_pid=None, agent_start=None):
     if not isinstance(text, str) or not text.strip() or len(text) > 16000:
         raise ValueError("Supply non-empty summary text, at most 16000 characters")
-    pane, _ = resolve_pane(session, pane, pane_pid)  # Validate before any DB open/write.
+    pane, root_pid = resolve_pane(session, pane, pane_pid)  # Validate before any DB open/write.
+    resolve_agent(root_pid, agent_pid, agent_start)
     target = f"={session}:.{pane}"  # Refused by tmux if the pane moves to another session.
     database = Path(database) if database else Path.home() / ".claude/state/messages.db"
     path = database.expanduser().resolve(strict=True)
@@ -80,12 +127,15 @@ def main():
     parser.add_argument("--session", required=True)
     parser.add_argument("--pane", help="Exact pane ID; otherwise the whole session must have one pane")
     parser.add_argument("--pane-pid", type=int, help="Require the recorded pane process ID")
+    parser.add_argument("--agent-pid", type=int, help="Require the recorded Claude agent PID")
+    parser.add_argument("--agent-start", help="Require the recorded Claude process start time")
     parser.add_argument("--text-file", type=Path, required=True)
     parser.add_argument("--key", help="Stable kanban-watch: key for a safe retry")
     args = parser.parse_args()
     try:
         print(json.dumps(notify(args.session, args.text_file.read_text(encoding="utf-8"), args.key,
-                                pane=args.pane, pane_pid=args.pane_pid), sort_keys=True))
+                                pane=args.pane, pane_pid=args.pane_pid,
+                                agent_pid=args.agent_pid, agent_start=args.agent_start), sort_keys=True))
     except (OSError, ValueError, sqlite3.Error, subprocess.SubprocessError) as exc:
         print(f"notify_session: {exc}", file=sys.stderr)
         return 1

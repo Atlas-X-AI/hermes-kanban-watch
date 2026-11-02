@@ -100,7 +100,20 @@ def test_missing_or_replaced_parent_never_redirects(shared_tmux, monkeypatch, pa
     assert not json.loads(Path(config["lease"]).read_text())["stopped"]
 
 
-@pytest.mark.parametrize("field", ["pane", "pane_pid"])
+def test_changed_pane_root_refuses_even_if_agent_is_reparented(shared_tmux, monkeypatch):
+    _, inbox = shared_tmux
+    monkeypatch.setenv("TMUX_PANE", "%42")
+    receipt = json.loads(launch("--prepare-only", "--cards", "t_done").stdout)
+    monkeypatch.setenv("SESSION_PANES", "%42 9999\n%43 4300")
+    monkeypatch.setenv("PANE_PROCESSES", "9999 1 Mon Nov 2 08:00:00 2026 zsh S\n"
+                       "4201 9999 Mon Nov 2 08:01:00 2026 claude S")
+    before = inbox.read_bytes()
+    result = tick(receipt)
+    assert result.returncode == 5 and "delivery UNKNOWN" in result.stderr
+    assert inbox.read_bytes() == before and not rows(inbox)
+
+
+@pytest.mark.parametrize("field", ["pane", "pane_pid", "agent_pid", "agent_start"])
 def test_unpinned_config_cannot_resolve_a_new_target(shared_tmux, monkeypatch, field):
     _, inbox = shared_tmux
     monkeypatch.setenv("TMUX_PANE", "%42")
@@ -126,6 +139,65 @@ def test_one_pane_prepare_records_target_without_environment(shared_tmux, monkey
     assert (config["pane"], config["pane_pid"]) == ("%42", 4200)
     assert tick(receipt).returncode == 0
     assert rows(inbox) == [("desk", "=desk:.%42")]
+
+
+@pytest.mark.parametrize("external", [None, "%99"])
+def test_external_caller_accepts_an_unambiguous_one_pane_target(shared_tmux, monkeypatch, external):
+    _, inbox = shared_tmux
+    monkeypatch.setenv("SESSION_PANES", "%42 4200")
+    if external:
+        monkeypatch.setenv("TMUX_PANE", external)
+    out = launch("--prepare-only", "--cards", "t_done")
+    assert out.returncode == 0, out.stderr
+    receipt = json.loads(out.stdout)
+    config = json.loads(Path(receipt["config"]).read_text())
+    assert (config["pane"], config["agent_pid"]) == ("%42", 4201)
+    assert tick(receipt).returncode == 0
+    assert rows(inbox) == [("desk", "=desk:.%42")]
+
+
+def test_explicit_foreign_pane_never_falls_back(shared_tmux, monkeypatch):
+    _, inbox = shared_tmux
+    monkeypatch.setenv("SESSION_PANES", "%42 4200")
+    out = launch("--prepare-only", "--cards", "t_done", "--pane", "%99")
+    assert out.returncode != 0
+    assert not rows(inbox)
+
+
+@pytest.mark.parametrize("change", ["exited", "replaced", "reused-pid", "moved", "ambiguous"])
+def test_agent_change_inside_unchanged_shell_refuses_delivery(shared_tmux, monkeypatch, change):
+    _, inbox = shared_tmux
+    monkeypatch.setenv("TMUX_PANE", "%42")
+    out = launch("--prepare-only", "--cards", "t_done")
+    assert out.returncode == 0, out.stderr
+    receipt = json.loads(out.stdout)
+    root = "4200 1 Mon Nov 2 08:00:00 2026 zsh S"
+    agent = "4201 4200 Mon Nov 2 08:01:00 2026 claude S"
+    trees = {
+        "exited": root,
+        "replaced": root + "\n4202 4200 Mon Nov 2 08:02:00 2026 claude S",
+        "reused-pid": root + "\n4201 4200 Mon Nov 2 08:02:00 2026 claude S",
+        "moved": root + "\n4201 9999 Mon Nov 2 08:01:00 2026 claude S",
+        "ambiguous": root + "\n" + agent + "\n4202 4200 Mon Nov 2 08:02:00 2026 claude S",
+    }
+    monkeypatch.setenv("PANE_PROCESSES", trees[change])
+    before = inbox.read_bytes()
+    result = tick(receipt)
+    assert result.returncode == 5 and "delivery UNKNOWN" in result.stderr
+    assert inbox.read_bytes() == before and not rows(inbox)
+    config = json.loads(Path(receipt["config"]).read_text())
+    relay = json.loads(Path(config["relay_state"]).read_text())
+    assert relay["pending"]["reason"] == "final" and "last_receipt" not in relay
+
+
+def test_bare_shell_is_not_an_agent_at_prepare_time(shared_tmux, monkeypatch):
+    log, inbox = shared_tmux
+    monkeypatch.setenv("TMUX_PANE", "%42")
+    monkeypatch.setenv("PANE_PROCESSES", "4200 1 Mon Nov 2 08:00:00 2026 zsh S")
+    out = launch("--prepare-only", "--cards", "t_done")
+    assert out.returncode != 0
+    assert not log.exists() and not rows(inbox)
+    assert not (Path(os.environ["XDG_STATE_HOME"]) / "hermes-kanban-watch").exists()
 
 
 @pytest.fixture
