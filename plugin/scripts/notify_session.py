@@ -17,22 +17,35 @@ import sys
 import uuid
 
 
-def resolve_pane(session):
+def resolve_pane(session, pane=None, pane_pid=None):
+    """Return an exact (pane ID, pane process ID), never the active window's pane."""
     if not isinstance(session, str) or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,199}", session):
         raise ValueError("Invalid exact tmux session name")
-    # '=' prevents tmux's prefix matching; ':' selects the session, not a window.
-    result = subprocess.run(["tmux", "list-panes", "-t", f"={session}:", "-F", "#{pane_id}"],
+    if pane is not None and (not isinstance(pane, str) or not re.fullmatch(r"%[0-9]+", pane)):
+        raise ValueError("Invalid exact tmux pane ID")
+    if pane_pid is not None and (type(pane_pid) is not int or pane_pid <= 0 or pane is None):
+        raise ValueError("Invalid recorded tmux pane process ID")
+    # '=' prevents prefix matching; '-s' includes EVERY window, not just the active one.
+    result = subprocess.run(["tmux", "list-panes", "-s", "-t", f"={session}:",
+                             "-F", "#{pane_id} #{pane_pid}"],
                             capture_output=True, text=True, timeout=10)
-    panes = result.stdout.splitlines()
-    if result.returncode or len(panes) != 1 or not re.fullmatch(r"%[0-9]+", panes[0]):
-        raise ValueError("Session missing, pane unreadable or multiple panes; nothing queued")
-    return panes[0]
+    lines = result.stdout.splitlines()
+    if result.returncode or not lines or any(not re.fullmatch(r"%[0-9]+ [1-9][0-9]*", line) for line in lines):
+        raise ValueError("Session missing or panes unreadable; nothing queued")
+    panes = [line.split() for line in lines]
+    matches = [row for row in panes if pane is None or row[0] == pane]
+    if len(matches) != 1:
+        raise ValueError("Recorded pane missing or target ambiguous; supply --pane or TMUX_PANE at prepare time; nothing queued")
+    found, pid = matches[0][0], int(matches[0][1])
+    if pane_pid is not None and pid != pane_pid:
+        raise ValueError("Recorded pane process changed; nothing queued")
+    return found, pid
 
 
-def notify(session, text, key=None, database=None):
+def notify(session, text, key=None, database=None, *, pane=None, pane_pid=None):
     if not isinstance(text, str) or not text.strip() or len(text) > 16000:
         raise ValueError("Supply non-empty summary text, at most 16000 characters")
-    pane = resolve_pane(session)  # No DB open/write until exact target validation succeeds.
+    pane, _ = resolve_pane(session, pane, pane_pid)  # Validate before any DB open/write.
     target = f"={session}:.{pane}"  # Refused by tmux if the pane moves to another session.
     database = Path(database) if database else Path.home() / ".claude/state/messages.db"
     path = database.expanduser().resolve(strict=True)
@@ -65,11 +78,14 @@ def notify(session, text, key=None, database=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--session", required=True)
+    parser.add_argument("--pane", help="Exact pane ID; otherwise the whole session must have one pane")
+    parser.add_argument("--pane-pid", type=int, help="Require the recorded pane process ID")
     parser.add_argument("--text-file", type=Path, required=True)
     parser.add_argument("--key", help="Stable kanban-watch: key for a safe retry")
     args = parser.parse_args()
     try:
-        print(json.dumps(notify(args.session, args.text_file.read_text(encoding="utf-8"), args.key), sort_keys=True))
+        print(json.dumps(notify(args.session, args.text_file.read_text(encoding="utf-8"), args.key,
+                                pane=args.pane, pane_pid=args.pane_pid), sort_keys=True))
     except (OSError, ValueError, sqlite3.Error, subprocess.SubprocessError) as exc:
         print(f"notify_session: {exc}", file=sys.stderr)
         return 1

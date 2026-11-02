@@ -31,6 +31,11 @@ bash scripts/start_watcher.sh --prepare-only --board demo --session exact-tmux-n
 ```
 
 Omit `--discord-channel` for the unchanged inbox-only parent relay.
+For a shared tmux session, preparation takes the starting pane from `--pane %N`
+or the caller's `TMUX_PANE` (the explicit option wins). Without either, the entire
+session must contain exactly one pane across all windows. Preparation records
+both the pane ID and its tmux pane process ID; changing the active window never
+changes the destination. Pass `--pane` when preparing from outside the parent's pane.
 `--discord-session <live-session-name>` (instead of a fixed `--discord-channel`) resolves the
 channel for every post with `GET /discord/sessions/<name>/channel` on the loopback relay
 (`KANBAN_WATCH_DISCORD_RELAY`, default `http://127.0.0.1:3100`; loopback only), so a channel
@@ -102,7 +107,12 @@ continuously. A problem can re-alert after recovery and recurrence.
 Problems are blocked, ready over 600 seconds with no recorded worker, unresolved
 respawn_guarded/spawn_failed events, a current dependency_wait parent question,
 latest `ASK PARENT:` / `ASK OPERATOR:` comment, or a live run beyond its recorded
-max runtime. Unheaded prose is not a question; a later answer/comment or resumed
+max runtime. A ready card under a current concurrency cap is labelled `capped`
+(using the same latest-event rule as `wave_status.py`), counted in the summary
+and still waiting, but is not a `ready_no_worker` problem. `capped_alerted` does
+not end that cap episode; a later non-cap event does. Other problems, such as a
+spawn failure or a parent question, remain reportable even while capped.
+Unheaded prose is not a question; a later answer/comment or resumed
 run clears the old ask. There is no natural-language question inference.
 
 `--home` selects the board-data root explicitly. Otherwise use `HERMES_HOME`,
@@ -184,9 +194,19 @@ No real Discord or live inbox is used by tests.
 python3 scripts/notify_session.py --session exact-tmux-name --text-file /path/to/summary.txt
 ```
 
-It uses tmux's exact `=<session>:` target for `list-panes`, refusing missing,
-prefix-only or multi-pane targets without inserting a row. The message target
-is `=<session>:.%N`, so moving the pane to another session invalidates delivery.
+It uses tmux's exact `=<session>:` target with `list-panes -s`, inspecting all
+windows. Without `--pane %N`, only a single-pane session is accepted; missing,
+prefix-only or ambiguous targets insert nothing. `--pane-pid <pid>` additionally
+requires the recorded pane process. Prepared watchers supply both stored values
+on every inbox path, including error notes, and never resolve a replacement from
+the helper's environment. Old inbox configs without the binding fail closed and
+must be prepared again after reconciling any pending delivery; they are not migrated.
+The message target is `=<session>:.%N`, so moving the pane to another session
+invalidates delivery. Missing panes or changed pane processes retain the pending
+event, report delivery UNKNOWN and never redirect. The process check identifies
+tmux's pane process, not a particular conversation or a child restarted in the
+same shell. Validation is at queue time; a queued row still does not prove later
+poller delivery or guard a process replacement after queueing.
 One `project_channel_message` row carries the text/render shape of the existing
 session-channel writer. It never types directly into tmux or creates an inbox.
 The receipt reads the exact row back: `notified: 0` queued, `2` held, `1` notified.

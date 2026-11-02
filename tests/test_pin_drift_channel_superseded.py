@@ -20,7 +20,8 @@ from test_watcher_discord import calls_at, discord_env, inbox_texts, tick  # noq
 
 
 @pytest.fixture
-def reader():
+def reader(monkeypatch):
+    monkeypatch.syspath_prepend(str(PLUGIN / "scripts"))
     spec = importlib.util.spec_from_file_location("board_watch", PLUGIN / "scripts/board_watch.py")
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

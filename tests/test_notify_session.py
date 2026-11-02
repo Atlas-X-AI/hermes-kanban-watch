@@ -25,9 +25,9 @@ def inbox(isolated_home, tmp_path, monkeypatch):
 from pathlib import Path
 with open(os.environ['TMUX_CALLS'], 'a') as f:
     f.write(json.dumps(sys.argv[1:]) + '\\n')
-if sys.argv[1:] != ['list-panes', '-t', '=desk:', '-F', '#{pane_id}']:
+if sys.argv[1:] != ['list-panes', '-s', '-t', '=desk:', '-F', '#{pane_id} #{pane_pid}']:
     sys.exit(1)
-print(os.environ.get('TMUX_PANES', '%42'))
+print(os.environ.get('TMUX_PANES', '%42 4200'))
 ''')
     tmux.chmod(0o755)
     monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ["PATH"])
@@ -70,12 +70,36 @@ def test_missing_or_invalid_session_never_writes(inbox, session):
     assert db.read_bytes() == before
 
 
-@pytest.mark.parametrize("panes", ["", "%42\n%43", "not-a-pane"])
+@pytest.mark.parametrize("panes", ["", "%42 4200\n%43 4300", "not-a-pane"])
 def test_ambiguous_or_invalid_pane_refused(inbox, monkeypatch, panes):
     db, text = inbox
     monkeypatch.setenv("TMUX_PANES", panes)
     before = db.read_bytes()
     assert notify(text).returncode != 0
+    assert db.read_bytes() == before
+
+
+def test_explicit_pane_in_shared_session(inbox, monkeypatch):
+    db, text = inbox
+    monkeypatch.setenv("TMUX_PANES", "%43 4300\n%42 4200")
+    result = notify(text, "desk", "--pane", "%42", "--pane-pid", "4200")
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["notify_target"] == "=desk:.%42"
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("select notify_target from messages").fetchall() == [("=desk:.%42",)]
+
+
+@pytest.mark.parametrize("extra", [
+    ("--pane", "%999"), ("--pane", ""), ("--pane", "%42\n"),
+    ("--pane", "%42", "--pane-pid", "9999"),
+    ("--pane", "%42", "--pane-pid", "0"), ("--pane-pid", "4200"),
+])
+def test_invalid_explicit_identity_does_not_open_inbox(inbox, monkeypatch, extra):
+    db, text = inbox
+    monkeypatch.setenv("TMUX_PANES", "%42 4200\n%43 4300")
+    before = db.read_bytes()
+    result = notify(text, "desk", *extra)
+    assert result.returncode != 0
     assert db.read_bytes() == before
 
 
@@ -135,7 +159,21 @@ def test_real_tmux_exact_session_contract_in_owned_server(inbox, tmp_path):
                               capture_output=True, text=True, timeout=5)
         assert pane.returncode == 0 and pane.stdout.strip().startswith("%")
         assert receipt["notify_target"] == "=desk:." + pane.stdout.strip()
+        parent_pane = pane.stdout.strip()
+        # A second, active window must neither become the destination nor make the
+        # recorded target invalid. This server has its own temporary socket.
+        other = subprocess.run([*base, "new-window", "-t", "desk:", "sleep 60"],
+                               capture_output=True, text=True, timeout=5)
+        assert other.returncode == 0, other.stderr
+        shared = notify(text, "desk", "--pane", parent_pane)
+        assert shared.returncode == 0, shared.stderr
+        target = json.loads(shared.stdout)["notify_target"]
+        resolved = subprocess.run([*base, "display-message", "-p", "-t", target, "#{pane_id}"],
+                                  capture_output=True, text=True, timeout=5)
+        assert resolved.returncode == 0 and resolved.stdout.strip() == parent_pane
         before = db.read_bytes()
+        assert notify(text).returncode != 0  # No active-window fallback in a shared session.
+        assert db.read_bytes() == before
         assert notify(text, "des").returncode != 0
         assert db.read_bytes() == before
     finally:

@@ -426,7 +426,7 @@ def test_sender_process_errors_are_safe_and_not_retried(discord_env, monkeypatch
         raise error
 
     monkeypatch.setattr(watcher_tick.subprocess, "run", fail)
-    monkeypatch.setattr(watcher_tick, "notify", lambda *args: {"queued": True})
+    monkeypatch.setattr(watcher_tick, "notify", lambda *args, **kwargs: {"queued": True})
     for _ in range(2):
         with pytest.raises(ValueError) as caught:
             watcher_tick.tick(receipt["config"])

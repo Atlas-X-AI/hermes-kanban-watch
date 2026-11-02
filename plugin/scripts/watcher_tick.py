@@ -176,6 +176,14 @@ def send_discord(config, wake, channel):
     return {"message_id": receipt[1], "channel": channel}
 
 
+def notify_parent(config, text, key):
+    """Prepared inbox routes must never rediscover a target, even for error notes."""
+    pane, pane_pid = config.get("pane"), config.get("pane_pid")
+    if pane is None or pane_pid is None:
+        raise ValueError("Inbox config has no recorded pane identity; prepare a new watcher")
+    return notify(config["session"], text, key, pane=pane, pane_pid=pane_pid)
+
+
 def relay_tick(config):
     relay_path = Path(config["relay_state"])
     relay: dict = json.loads(relay_path.read_text()) if relay_path.exists() else {"sequence": 0}
@@ -225,7 +233,7 @@ def relay_tick(config):
                     note += "\n" + text  # Summaries otherwise reach only Discord.
                 relay["last_channel_failure"] = exc.kind
                 if config["delivery"] == "inbox":
-                    notify(config["session"], note, key + ":channel-unresolved")
+                    notify_parent(config, note, key + ":channel-unresolved")
                 else:
                     print(note)
         if channel:
@@ -244,13 +252,13 @@ def relay_tick(config):
                 atomic_json(relay_path, relay)  # Persist before trying the parent inbox.
                 if config["delivery"] == "inbox":
                     try:
-                        notify(config["session"], f"problem: {failure}; stop for reconciliation, no retry.",
-                               key + ":discord-unknown")
+                        notify_parent(config, f"problem: {failure}; stop for reconciliation, no retry.",
+                                      key + ":discord-unknown")
                     except (OSError, ValueError, sqlite3.Error, subprocess.SubprocessError):
                         raise ValueError(f"{failure}; pending event retained; parent notification UNKNOWN") from None
                 raise ValueError(f"{failure}; pending event retained; reconciliation required, no retry") from None
         if config["delivery"] == "inbox" and (not discord or reason != "summary"):
-            receipt = notify(config["session"], text, key)
+            receipt = notify_parent(config, text, key)
             relay["last_receipt"] = receipt
         # stdout is a local artifact, not proof of native parent receipt. With
         # Discord enabled, neither the watcher nor parent must relay it again.
