@@ -1,0 +1,12 @@
+[extend]
+useDefault = true
+
+[[rules]]
+id = "discord-client-id"
+
+[[rules.allowlists]]
+description = "Synthetic channel ID used by the fake inbox delivery sender"
+condition = "AND"
+paths = ['''^tests/test_inbox_pane_binding\.py$''']
+regexTarget = "secret"
+regexes = ['''^123456789012345678$''']
