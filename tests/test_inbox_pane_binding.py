@@ -129,6 +129,27 @@ def test_unpinned_config_cannot_resolve_a_new_target(shared_tmux, monkeypatch, f
     assert not rows(inbox)
 
 
+def test_old_config_without_any_binding_key_fails_closed(shared_tmux, monkeypatch):
+    """A pre-binding config must never rediscover a target, even on a one-pane
+    session where auto-resolution would succeed."""
+    _, inbox = shared_tmux
+    monkeypatch.setenv("SESSION_PANES", "%42 4200")  # One pane: the old fallback would resolve it.
+    monkeypatch.setenv("TMUX_PANE", "%42")
+    out = launch("--prepare-only", "--cards", "t_done")
+    assert out.returncode == 0, out.stderr
+    receipt = json.loads(out.stdout)
+    config = json.loads(Path(receipt["config"]).read_text())
+    for field in ("pane", "pane_pid", "agent_pid", "agent_start"):
+        config.pop(field)
+    Path(receipt["config"]).write_text(json.dumps(config))
+    before = inbox.read_bytes()
+    result = tick(receipt)
+    assert result.returncode == 5 and "delivery UNKNOWN" in result.stderr
+    assert inbox.read_bytes() == before and not rows(inbox)
+    relay = json.loads(Path(config["relay_state"]).read_text())
+    assert relay["pending"]["reason"] == "final" and "last_receipt" not in relay
+
+
 def test_one_pane_prepare_records_target_without_environment(shared_tmux, monkeypatch):
     _, inbox = shared_tmux
     monkeypatch.setenv("SESSION_PANES", "%42 4200")
