@@ -13,6 +13,9 @@ from test_watcher_discord import CHANNEL
     ("tests/test_inbox_pane_binding.py", CHANNEL, 0),
     ("other.py", CHANNEL, 1),
     ("tests/test_inbox_pane_binding.py", CHANNEL[::-1], 1),
+    # The allowlist path is anchored: a nested copy or a suffixed copy stays flagged.
+    ("sub/tests/test_inbox_pane_binding.py", CHANNEL, 1),
+    ("tests/test_inbox_pane_binding.py.bak", CHANNEL, 1),
 ])
 def test_channel_fixture_allowlist_is_exact(tmp_path, relative, value, expected):
     if shutil.which("gitleaks") is None:
