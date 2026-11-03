@@ -105,8 +105,8 @@ def test_changed_pane_root_refuses_even_if_agent_is_reparented(shared_tmux, monk
     monkeypatch.setenv("TMUX_PANE", "%42")
     receipt = json.loads(launch("--prepare-only", "--cards", "t_done").stdout)
     monkeypatch.setenv("SESSION_PANES", "%42 9999\n%43 4300")
-    monkeypatch.setenv("PANE_PROCESSES", "9999 1 Mon Nov 2 08:00:00 2026 zsh S\n"
-                       "4201 9999 Mon Nov 2 08:01:00 2026 claude S")
+    monkeypatch.setenv("PANE_PROCESSES", "9999 1 S Mon Nov 2 08:00:00 2026 zsh\n"
+                       "4201 9999 S Mon Nov 2 08:01:00 2026 claude")
     before = inbox.read_bytes()
     result = tick(receipt)
     assert result.returncode == 5 and "delivery UNKNOWN" in result.stderr
@@ -171,14 +171,14 @@ def test_agent_change_inside_unchanged_shell_refuses_delivery(shared_tmux, monke
     out = launch("--prepare-only", "--cards", "t_done")
     assert out.returncode == 0, out.stderr
     receipt = json.loads(out.stdout)
-    root = "4200 1 Mon Nov 2 08:00:00 2026 zsh S"
-    agent = "4201 4200 Mon Nov 2 08:01:00 2026 claude S"
+    root = "4200 1 S Mon Nov 2 08:00:00 2026 zsh"
+    agent = "4201 4200 S Mon Nov 2 08:01:00 2026 claude"
     trees = {
         "exited": root,
-        "replaced": root + "\n4202 4200 Mon Nov 2 08:02:00 2026 claude S",
-        "reused-pid": root + "\n4201 4200 Mon Nov 2 08:02:00 2026 claude S",
-        "moved": root + "\n4201 9999 Mon Nov 2 08:01:00 2026 claude S",
-        "ambiguous": root + "\n" + agent + "\n4202 4200 Mon Nov 2 08:02:00 2026 claude S",
+        "replaced": root + "\n4202 4200 S Mon Nov 2 08:02:00 2026 claude",
+        "reused-pid": root + "\n4201 4200 S Mon Nov 2 08:02:00 2026 claude",
+        "moved": root + "\n4201 9999 S Mon Nov 2 08:01:00 2026 claude",
+        "ambiguous": root + "\n" + agent + "\n4202 4200 S Mon Nov 2 08:02:00 2026 claude",
     }
     monkeypatch.setenv("PANE_PROCESSES", trees[change])
     before = inbox.read_bytes()
@@ -193,7 +193,7 @@ def test_agent_change_inside_unchanged_shell_refuses_delivery(shared_tmux, monke
 def test_bare_shell_is_not_an_agent_at_prepare_time(shared_tmux, monkeypatch):
     log, inbox = shared_tmux
     monkeypatch.setenv("TMUX_PANE", "%42")
-    monkeypatch.setenv("PANE_PROCESSES", "4200 1 Mon Nov 2 08:00:00 2026 zsh S")
+    monkeypatch.setenv("PANE_PROCESSES", "4200 1 S Mon Nov 2 08:00:00 2026 zsh")
     out = launch("--prepare-only", "--cards", "t_done")
     assert out.returncode != 0
     assert not log.exists() and not rows(inbox)

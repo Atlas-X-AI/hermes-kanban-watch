@@ -54,7 +54,10 @@ def resolve_agent(pane_pid, agent_pid=None, agent_start=None):
     if (agent_pid is None) != (agent_start is None) or (agent_pid is not None and (
             type(agent_pid) is not int or agent_pid <= 0 or not isinstance(agent_start, str) or not agent_start)):
         raise ValueError("Invalid recorded agent identity")
-    result = subprocess.run(["ps", "-eo", "pid=,ppid=,lstart=,comm=,stat="],
+    # Fixed fields with the state BEFORE lstart: a zombie's comm prints as
+    # "claude <defunct", so any layout ending in command columns can misread
+    # the state from the command text. Parse from the left, never from comm.
+    result = subprocess.run(["ps", "-eo", "pid=,ppid=,stat=,lstart=,comm="],
                             capture_output=True, text=True, timeout=10, env={**os.environ, "LC_ALL": "C"})
     if result.returncode:
         raise ValueError("Agent process tree unreadable; nothing queued")
@@ -63,10 +66,10 @@ def resolve_agent(pane_pid, agent_pid=None, agent_start=None):
         fields = line.split(None, 8)
         if len(fields) != 9 or not fields[0].isdigit() or not fields[1].isdigit():
             raise ValueError("Agent process tree unreadable; nothing queued")
-        pid, parent = int(fields[0]), int(fields[1])
+        pid, parent, state = int(fields[0]), int(fields[1]), fields[2]
         if pid in processes:
             raise ValueError("Agent process tree ambiguous; nothing queued")
-        processes[pid] = (parent, " ".join(fields[2:7]), fields[7], fields[8])
+        processes[pid] = (parent, state, " ".join(fields[3:8]), fields[8])
 
     def in_pane(pid):
         seen = set()
@@ -77,8 +80,8 @@ def resolve_agent(pane_pid, agent_pid=None, agent_start=None):
             pid = processes[pid][0]
         return False
 
-    agents = [(pid, row[1]) for pid, row in processes.items()
-              if Path(row[2]).name == "claude" and row[3][:1] not in {"Z", "X"} and in_pane(pid)]
+    agents = [(pid, row[2]) for pid, row in processes.items()
+              if Path(row[3]).name == "claude" and row[1][:1] not in {"Z", "X"} and in_pane(pid)]
     if len(agents) != 1:
         raise ValueError("Pane has no unique Claude agent process; nothing queued")
     found, started = agents[0]

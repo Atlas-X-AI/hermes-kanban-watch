@@ -1,6 +1,7 @@
 """Real inbox SQL, fake tmux plus one owned-server contract test, no live delivery."""
 import json
 import os
+from pathlib import Path
 import shlex
 import shutil
 import sqlite3
@@ -141,10 +142,10 @@ def test_dedupe_replays_do_not_insert_twice(inbox):
 
 
 @pytest.mark.parametrize("processes", [
-    "4200 1 Mon Nov 2 08:00:00 2026 zsh S\n4201 4200 Mon Nov 2 08:01:00 2026 claude Z",
-    "4200 1 Mon Nov 2 08:00:00 2026 zsh S\n4201 4200 Mon Nov 2 08:01:00 2026 claude X",
-    "4200 1 Mon Nov 2 08:00:00 2026 zsh S\n4201 4200 Mon Nov 2 08:01:00 2026 node S",
-    "4201 4202 Mon Nov 2 08:01:00 2026 claude S\n4202 4201 Mon Nov 2 08:01:00 2026 zsh S",
+    "4200 1 S Mon Nov 2 08:00:00 2026 zsh\n4201 4200 Z Mon Nov 2 08:01:00 2026 claude",
+    "4200 1 S Mon Nov 2 08:00:00 2026 zsh\n4201 4200 X Mon Nov 2 08:01:00 2026 claude",
+    "4200 1 S Mon Nov 2 08:00:00 2026 zsh\n4201 4200 S Mon Nov 2 08:01:00 2026 node",
+    "4201 4202 S Mon Nov 2 08:01:00 2026 claude\n4202 4201 S Mon Nov 2 08:01:00 2026 zsh",
     "unreadable process output",
 ])
 def test_dead_unknown_or_unreadable_agents_never_open_inbox(inbox, monkeypatch, processes):
@@ -157,9 +158,9 @@ def test_dead_unknown_or_unreadable_agents_never_open_inbox(inbox, monkeypatch, 
 
 def test_agent_ancestry_can_include_intermediate_shells(inbox, monkeypatch):
     _, text = inbox
-    monkeypatch.setenv("PANE_PROCESSES", "4200 1 Mon Nov 2 08:00:00 2026 zsh S\n"
-                       "4202 4200 Mon Nov 2 08:00:01 2026 bash S\n"
-                       "4201 4202 Mon Nov 2 08:01:00 2026 claude S")
+    monkeypatch.setenv("PANE_PROCESSES", "4200 1 S Mon Nov 2 08:00:00 2026 zsh\n"
+                       "4202 4200 S Mon Nov 2 08:00:01 2026 bash\n"
+                       "4201 4202 S Mon Nov 2 08:01:00 2026 claude")
     assert notify(text, "desk", "--agent-pid", "4201", "--agent-start", "Mon Nov 2 08:01:00 2026").returncode == 0
 
 
@@ -234,5 +235,72 @@ def test_real_tmux_exact_session_contract_in_owned_server(inbox, tmp_path, monke
         assert resolve_pane("desk", parent_pane)[1] == pane_pid
         assert notify(text, "desk", *binding).returncode != 0
         assert db.read_bytes() == before
+    finally:
+        subprocess.run([*base, "kill-server"], capture_output=True, timeout=5, check=True)
+
+
+def test_zombie_agent_under_unchanged_pane_root_is_never_live(inbox, tmp_path, monkeypatch):
+    """Real procps zombie: comm prints as 'claude <defunct', so a command-last
+    ps layout misreads the state column and a zombie passes as live."""
+    import time
+
+    real_tmux = shutil.which("tmux", path=os.defpath)
+    real_ps = shutil.which("ps", path=os.defpath)
+    if real_tmux is None or real_ps is None or sys.platform != "linux":
+        pytest.skip("Linux, tmux and ps required for the real-zombie contract")
+    db, text = inbox
+    socket = tmp_path / "tmux.sock"
+    base = [real_tmux, "-S", str(socket)]
+    ready, stop = tmp_path / "ready", tmp_path / "stop"
+    # The pane root forks one child named 'claude' and never reaps it: when the
+    # child exits it stays a real zombie under the unchanged pane root.
+    root = tmp_path / "pane_root.py"
+    root.write_text("import ctypes, os, time\nfrom pathlib import Path\n"
+                    "child = os.fork()\n"
+                    "if child == 0:\n"
+                    "    assert ctypes.CDLL(None).prctl(15, b'claude', 0, 0, 0) == 0\n"
+                    f"    Path({str(ready)!r}).touch()\n"
+                    "    deadline = time.monotonic() + 120\n"
+                    f"    while not Path({str(stop)!r}).exists() and time.monotonic() < deadline:\n"
+                    "        time.sleep(0.01)\n"
+                    "    os._exit(0)\n"
+                    "time.sleep(120)\n")
+    created = subprocess.run([*base, "-f", "/dev/null", "new-session", "-d", "-s", "desk",
+                              f"{shlex.quote(sys.executable)} {shlex.quote(str(root))}"],
+                             capture_output=True, text=True, timeout=5)
+    assert created.returncode == 0, created.stderr
+    try:
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists(), "synthetic agent did not become ready"
+        wrapper = tmp_path / "bin/tmux"
+        wrapper.parent.mkdir(exist_ok=True)
+        wrapper.write_text(f"#!{sys.executable}\n" +
+                           f"import os, sys\nos.execv({real_tmux!r}, {base!r} + sys.argv[1:])\n")
+        (tmp_path / "bin/ps").write_text(f"#!{sys.executable}\n" +
+                                         f"import os, sys\nos.execv({real_ps!r}, [{real_ps!r}] + sys.argv[1:])\n")
+        monkeypatch.setenv("PATH", str(tmp_path / "bin") + os.pathsep + os.environ["PATH"])
+        monkeypatch.syspath_prepend(str(PLUGIN / "scripts"))
+        from notify_session import resolve_agent, resolve_pane
+        pane, pane_pid = resolve_pane("desk")
+        agent_pid, agent_start = resolve_agent(pane_pid)
+        before = db.read_bytes()
+        stop.touch()  # The child exits and is left unreaped: a real zombie.
+        deadline = time.monotonic() + 5
+        state = "?"
+        while time.monotonic() < deadline:
+            state = Path(f"/proc/{agent_pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+            if state == "Z":
+                break
+            time.sleep(0.01)
+        assert state == "Z", f"bound agent did not become a zombie (state {state})"
+        binding = ["--pane", pane, "--pane-pid", str(pane_pid),
+                   "--agent-pid", str(agent_pid), "--agent-start", agent_start]
+        result = notify(text, "desk", *binding)
+        assert result.returncode != 0
+        assert db.read_bytes() == before
+        with pytest.raises(ValueError):
+            resolve_agent(pane_pid, agent_pid, agent_start)
     finally:
         subprocess.run([*base, "kill-server"], capture_output=True, timeout=5, check=True)
