@@ -201,7 +201,7 @@ def test_public_contract_metadata_agent_skill_hooks():
     assert hook["matcher"] == "Bash"
     assert "${CLAUDE_PLUGIN_ROOT}/hooks/kanban_watch_nudge.py" in hook["hooks"][0]["command"]
     agent = (PLUGIN / "agents/kanban-watcher.md").read_text()
-    assert "tools: Bash, Read" in agent and "model: sonnet" in agent and "## Never" in agent
+    assert "tools: Bash, Read, SendMessage" in agent and "model: sonnet" in agent and "## Never" in agent
     assert "watcher_tick.py" in agent and "UNKNOWN" in agent
     assert "background" in agent and "Workflow is legacy" in agent
     skill = (PLUGIN / "skills/kanban-watch/SKILL.md").read_text()

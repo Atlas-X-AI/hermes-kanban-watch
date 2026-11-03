@@ -286,7 +286,7 @@ into a workflow row.
 | --- | --- |
 | NOT_STARTING | Card is ready, but no dispatcher has started it. Check Hermes, not the watcher. |
 | UNKNOWN | A read failed, permissions were denied or the response shape was invalid. It does not mean the card disappeared. |
-| No periodic parent update | A queued inbox row may be held or the native progress route unproved. Check the receipt; UNKNOWN is not delivery. |
+| No periodic parent update | A queued inbox row may be held. Claude native delivery requires SendMessage `to: "main"` for each helper report; `--harness claude` overrides automatic `CLAUDECODE` detection. The live route remains unproven until exercised after release/install; a prepared receipt stays UNKNOWN, not delivered. |
 | Reader missing | Rerun doctor, check `~/.local/bin` on PATH and the shim's install location. |
 | Foreign or stale reader | Doctor names the failing `hermes-kanban-live` path. Move it aside or correct PATH; `--fix` never overwrites it. |
 | Missing route profile | Replace example profile names with your own existing profiles. |

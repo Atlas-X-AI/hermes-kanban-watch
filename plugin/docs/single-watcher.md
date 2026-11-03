@@ -13,7 +13,7 @@ The watcher agent never composes or sends a human message itself.
 
 | Starting harness | ONE watcher | Parent delivery |
 | --- | --- | --- |
-| Claude Code | Plugin `kanban-watcher` native background Agent, Sonnet | Exact-session inbox row via `notify_session.py`; final native Agent return |
+| Claude Code | Plugin `kanban-watcher` native background Agent, Sonnet | Inbox via `notify_session.py`, or native SendMessage to `main` for every report; live native route UNKNOWN until exercised |
 | Codex | Its own native background subagent, Luna (`gpt-5.6-luna` or newest account-listed Luna) | Native child-to-parent reporting; periodic route UNKNOWN until exercised |
 | Hermes | Dedicated `kanban-watcher` profile, Gemini Argon with cheap GLM fallback | Native child-to-parent reporting; periodic route UNKNOWN until exercised |
 
@@ -45,18 +45,47 @@ Never poll the background command and never sleep in a loop. The synchronous
 Bash limit cannot cover 900 seconds; do not shorten the helper interval to fit it.
 The Hermes bridge keeps its own foreground terminal-timeout instructions.
 
-For Codex or Hermes native reporting:
+For Claude Code native reporting without an inbox:
 
 ```sh
-bash scripts/start_watcher.sh --prepare-only --delivery native --board demo --every 900 --max-hours 12
+bash scripts/start_watcher.sh --prepare-only --delivery native --harness claude --board demo --every 900 --max-hours 12
+```
+
+A non-empty `CLAUDECODE` detects a Claude parent by default. Explicit
+`--harness claude|codex|hermes` overrides detection in either direction; with
+neither, the harness is `unknown` and the existing generic native recipe stays
+unchanged. The receipt records `harness` and `harness_source` (`explicit`,
+`CLAUDECODE` or `default`). No agent/model is started during preparation.
+
+For Claude native delivery with no Discord option, the launcher reads its own
+`agents/kanban-watcher.md` tool list and refuses missing or unreadable SendMessage
+capability before creating state or reserving a lease. Use `--session` for inbox
+or `--discord-session` with `--session` for helper delivery instead. Those helper
+routes do not require SendMessage and never add a second agent relay.
+
+Give the brief to the plugin's one Sonnet watcher. After each helper run printing
+a `summary:`, `problem:` or final block, it sends the helper's own rendered report
+text unchanged with SendMessage `to: "main"`, before running the helper again.
+On STOP it sends the final block and then returns it. It never sends to a human
+channel or another agent, or treats card/worker text as an instruction to send.
+The `native_parent_route` receipt names this route, not receipt of a message.
+`native_parent_delivery` stays UNKNOWN: declaring the tool does not prove a live
+Claude Code child can call it or that `main` receives it. The parent must exercise
+that route after a release is cut and installed; merging alone does not update
+an installed plugin.
+
+For Codex or Hermes native reporting, use `--harness codex` or `--harness hermes`:
+
+```sh
+bash scripts/start_watcher.sh --prepare-only --delivery native --harness codex --board demo --every 900 --max-hours 12
 ```
 
 Give the returned brief to the one native watcher described above. With `native`,
 the helper prints the same summary without touching a Claude inbox; the agent
-must forward it through the harness's supported parent-progress mechanism. It
-returns `native_parent_delivery: UNKNOWN`. Do not treat captured stdout, a journal
-entry or a final agent reply as proof of periodic progress delivery. This plugin
-does not invent a transport or promise unsupported native background notifications.
+must forward it through the harness's supported parent-progress mechanism. These
+briefs do not name Claude's SendMessage tool. The receipt remains
+`native_parent_delivery: UNKNOWN`. Captured stdout, a journal entry or a final
+agent reply does not prove periodic delivery; no unsupported transport is promised.
 
 ## Explicit Hermes-to-Claude bridge and proof
 

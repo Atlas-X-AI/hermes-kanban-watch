@@ -21,11 +21,12 @@ The helper calls board_watch.py wait (60-second polling, summaries every ${every
 seconds). One helper command per wake is enough. ${delivery_instructions}
 The Python helper never claims a native parent received stdout.
 
-On CONTINUE: relay native output only if required by the delivery instructions,
-then run the SAME command again. Do not end the agent run after one summary.
-On STOP: report the final output or observed error to the parent and stop
-immediately. Never rerun after STOP. Deadline: ${until} Unix seconds.
-A max_hours stop is NOT completion. Use no more than two tool calls per wake.
+On CONTINUE: complete the selected delivery step above before running the SAME
+command again. Do not end the agent run after one summary.
+On STOP: complete the selected final delivery step, then return the final output
+or observed error to the parent and stop immediately. Never rerun after STOP.
+Deadline: ${until} Unix seconds. A max_hours stop is NOT completion.
+Use only the helper's start/read calls plus the selected delivery step.
 A normal board may run for 12 hours. Do not run a second watcher, Workflow,
 model, subagent or shell polling loop.
 

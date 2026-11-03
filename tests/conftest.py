@@ -27,7 +27,7 @@ def isolated_home(tmp_path, monkeypatch):
     # Never reach a real loopback relay: port 9 (discard) refuses; tests install a fake relay.
     monkeypatch.setenv("KANBAN_WATCH_DISCORD_RELAY", "http://127.0.0.1:9")
     for name in tuple(os.environ):
-        if name.startswith("HERMES_KANBAN_") or name == "KANBAN_WATCH_ROUTES":
+        if name.startswith("HERMES_KANBAN_") or name in {"KANBAN_WATCH_ROUTES", "CLAUDECODE"}:
             monkeypatch.delenv(name, raising=False)
     return home, hermes
 
