@@ -60,6 +60,13 @@ def break_agent(plugin, damage):
         agent = re.sub(r"^tools:.*$", "tools: Bash, Read, NotSendMessage", agent, flags=re.M)
     elif damage == "no-tools":
         agent = re.sub(r"^tools:.*\n", "", agent, flags=re.M)
+    elif damage == "duplicate-tools":
+        agent = agent.replace("tools: Bash, Read, SendMessage\n",
+                              "tools: Bash, Read, SendMessage\ntools: Bash, Read\n", 1)
+    elif damage == "tools-below-frontmatter":
+        line = re.search(r"^tools: .+\n", agent, re.M)
+        assert line, "watcher agent must declare its tools"
+        agent = agent.replace(line[0], "", 1) + line[0]
     elif damage == "unreadable":
         path.unlink()  # A missing plugin file is unreadable; no chmod/root dependency.
         return
@@ -122,7 +129,8 @@ def test_other_native_harness_never_names_claude_tool(native_env, harness):
     assert config["delivery"] == "native" and config["session"] is None
 
 
-@pytest.mark.parametrize("damage", ["missing-tool", "lookalike-tool", "no-tools", "unreadable", "invalid-encoding"])
+@pytest.mark.parametrize("damage", ["missing-tool", "lookalike-tool", "no-tools", "duplicate-tools",
+                                   "tools-below-frontmatter", "unreadable", "invalid-encoding"])
 @pytest.mark.parametrize("existing_lease", [False, True])
 def test_claude_native_refuses_before_any_state(native_env, damage, existing_lease):
     break_agent(native_env, damage)
