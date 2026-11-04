@@ -440,6 +440,14 @@ work = Path(sys.argv[1])
 work.mkdir(parents=True, exist_ok=True)
 deadline = time.monotonic() + 600
 while time.monotonic() < deadline:
+    rootname = work / "rootname"
+    if rootname.exists():
+        name = rootname.read_text().strip()
+        rootname.unlink()
+        assert ctypes.CDLL(None).prctl(15, name.encode(), 0, 0, 0) == 0
+        (work / "pid0").write_text(str(os.getpid()))
+        (work / "count").write_text("0")
+        (work / "ready0").touch()
     request = work / "spawn"
     if request.exists():
         names = request.read_text().split("|")
@@ -538,7 +546,15 @@ def proc_window(inbox, tmp_path, monkeypatch):
                              capture_output=True, text=True, timeout=5)
     assert created.returncode == 0, created.stderr
 
-    def start(names):
+    def start(names, root_name=None):
+        if root_name is not None:
+            (work / "rootname.tmp").write_text(root_name)
+            (work / "rootname.tmp").rename(work / "rootname")
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and not (work / "ready0").exists():
+                time.sleep(0.01)
+            assert (work / "ready0").exists(), "dispatcher never renamed itself"
+            return 0, int((work / "pid0").read_text())
         (work / "spawn.new").write_text("|".join(names))
         (work / "spawn.new").rename(work / "spawn")
         deadline = time.monotonic() + 5
@@ -795,6 +811,69 @@ FAKE_TABLE_R3 = ("4200 1 S Mon Nov 2 08:00:00 2026 zsh\n"
                  "4201 4200 S Mon Nov 2 08:01:00 2026 claude")
 FAKE_TABLE_SWAPPED_R3 = ("4200 1 S Mon Nov 2 08:00:00 2026 zsh\n"
                          "4201 4200 S Mon Nov 2 08:02:00 2026 claude")
+
+
+def test_agent_is_pane_root_inprocess_queues(proc_window, monkeypatch):
+    """D9: when the pane's own root process is the claude agent (claude run as
+    the pane command), the in-lock recheck accepts it. An agent whose PID is the
+    pane PID is in the pane."""
+    slot, agent = proc_window["start"](["claude"], root_name="claude")
+    inbox = proc_window["inbox"]
+    import notify_session as ns
+    pane, pane_pid = ns.resolve_pane("desk")
+    agent_pid, agent_start = ns.resolve_agent(pane_pid)
+    assert agent_pid == pane_pid == agent, (pane_pid, agent_pid, agent)
+    outcome = {}
+    try:
+        outcome["result"] = ns.notify("desk", "probe: pane root", "kanban-watch:rr4:self",
+                                      inbox, pane=pane, pane_pid=pane_pid,
+                                      agent_pid=agent_pid, agent_start=agent_start)
+    except Exception as exc:  # noqa: BLE001 - any refusal is recorded
+        outcome["error"] = f"{type(exc).__name__}: {exc}"
+    assert "result" in outcome, outcome
+    assert len(_r3_rows(inbox)) == 1
+
+
+def test_agent_is_pane_root_tick_path_queues(proc_window, board, tmp_path):
+    """D9, full tick path: the pane command is claude, so prepare records the
+    pane root itself as the agent and the tick delivers to the inbox."""
+    slot, agent = proc_window["start"](["claude"], root_name="claude")
+    prepare = subprocess.run([sys.executable, str(PLUGIN / "scripts/watcher_launch.py"),
+                              "--prepare-only", "--board", "demo", "--session", "desk",
+                              "--cards", "t_done"], capture_output=True, text=True, timeout=30)
+    assert prepare.returncode == 0, prepare.stderr
+    receipt = json.loads(prepare.stdout)
+    config = json.loads(Path(receipt["config"]).read_text())
+    assert config["pane_pid"] == config["agent_pid"] == agent, config
+    result = subprocess.run([sys.executable, str(PLUGIN / "scripts/watcher_tick.py"),
+                             "--config", receipt["config"]], capture_output=True, text=True,
+                            timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert len(_r3_rows(proc_window["inbox"])) == 1, result.stdout + result.stderr
+
+
+def test_replaced_and_outside_pane_agents_still_refuse(proc_window):
+    """D9 controls, on the /proc path: a replaced agent and an agent outside the
+    pane still refuse inside the lock."""
+    slot, agent = proc_window["start"](["claude"])
+    inbox = proc_window["inbox"]
+    import notify_session as ns
+    pane, pane_pid = ns.resolve_pane("desk")
+    agent_pid, agent_start = ns.resolve_agent(pane_pid)
+    assert agent_pid == agent
+    # A replaced agent: the recorded one exits, a same-named one appears under the pane.
+    proc_window["stop"](slot)  # zombie under the unchanged pane root
+    _r3_wait_state(agent_pid, {"Z"})
+    with pytest.raises(ValueError, match="nothing queued"):
+        ns.notify("desk", "probe: replaced", "kanban-watch:rr4:replaced", inbox,
+                  pane=pane, pane_pid=pane_pid, agent_pid=agent_pid, agent_start=agent_start)
+    # An agent outside the pane: the recorded identity is a live process whose
+    # parent chain never reaches the pane root. The in-lock walk still refuses.
+    outside = os.getpid()
+    with pytest.raises(ValueError, match="no longer runs under the pane"):
+        ns.revalidate_in_lock(pane_pid, ns._proc_identity(pane_pid)[2],
+                              outside, ns._proc_identity(outside)[2])
+    assert not _r3_rows(inbox)
 
 
 def _r3_fake_swap_refusal(inbox, tmp_path, monkeypatch, table_after):

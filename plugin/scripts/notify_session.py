@@ -132,8 +132,10 @@ def revalidate_in_lock(pane_pid, pane_start, agent_pid, agent_start):
         raise ValueError("Recorded agent process is not live; nothing queued")
     if pane_now[2] != pane_start or agent_now[2] != agent_start:
         raise ValueError("Recorded process identity changed; nothing queued")
+    # The walk starts at the agent itself: an agent whose PID is the pane PID
+    # (claude run as the pane command) is in the pane.
     seen = set()
-    pid = agent_now[1]  # The agent's parent: /proc/<pid>/stat field 4.
+    pid = agent_pid
     while pid not in seen and len(seen) <= 64:
         if pid == pane_pid:
             return
