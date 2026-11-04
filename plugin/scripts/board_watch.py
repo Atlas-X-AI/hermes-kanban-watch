@@ -20,6 +20,8 @@ import sys
 import tempfile
 import time
 
+from wave_status import cap_label
+
 FINAL = {"done", "archived"}
 KNOWN = FINAL | {"triage", "todo", "ready", "scheduled", "running", "review", "blocked"}
 RECOVERY = {"claimed", "spawned", "unblocked", "completed", "archived"}
@@ -110,6 +112,28 @@ def short(text, limit=240):
     return " ".join(str(text or "").split())[:limit]
 
 
+def live_cap(conn, card, now):
+    """An event is not a live slot holder. Check the whole board, not the watch subset.
+
+    Same-assignee running cards are a lower bound for a shared group cap. Without
+    group membership in the board we must not use unrelated workers as evidence.
+    """
+    capped = cap_label(conn, card["id"], now)
+    if not capped or type(capped["cap"]) is not int or capped["cap"] <= 0:
+        return None
+    assignee = capped["assignee"] or card["assignee"]
+    if not assignee or assignee != card["assignee"]:
+        return None
+    running = conn.execute("select count(*) from tasks where status='running' and assignee=?",
+                           (assignee,)).fetchone()[0]
+    if running < capped["cap"]:
+        return None
+    capped["running"] = running
+    who = capped["scope"] if capped["scope"].startswith("group:") else assignee
+    capped["label"] = f"capped {who} {running}/{capped['cap']} {capped['waiting_minutes']}m"
+    return capped
+
+
 def snapshot(board, cards=None, now=None, home=None):
     """One consistent read transaction; no CLI, profile, session or process inspection."""
     validate_scope(board, cards)
@@ -188,7 +212,10 @@ def snapshot(board, cards=None, now=None, home=None):
                         reason = payload(blocked[-1]).get("reason") or payload(blocked[-1]).get("block_reason")
                     problem("blocked", reason or "No block reason recorded", (blocked[-1]["id"] if blocked else "", reason))
                 live_run = bool(run and run["status"] == "running" and run["ended_at"] is None)
-                if status == "ready" and card["ready_age_s"] > 600 and not card.get("worker_pid") and not live_run:
+                capped = live_cap(conn, card, now) if status == "ready" else None
+                if capped:
+                    card["capped"] = capped
+                if status == "ready" and card["ready_age_s"] > 600 and not card.get("worker_pid") and not live_run and not capped:
                     problem("ready_no_worker", "Ready over 10 minutes; no worker recorded", ready_since)
                 recovery = max((e["id"] for e in events if e["kind"] in RECOVERY), default=0)
                 for e in events:
@@ -212,6 +239,7 @@ def snapshot(board, cards=None, now=None, home=None):
             result.append(card)
     counts = dict(sorted(Counter(c["status"] for c in result).items()))
     return {"read_status": "OK", "board": board, "now": now, "cards": result,
+            "capped": sum(1 for c in result if c.get("capped")),
             "counts": counts, "problems": problems, "superseded": superseded, "all_terminal": bool(result) and all(c["status"] in FINAL for c in result),
             "rough_time_left_s": 0 if result and all(c["status"] in FINAL for c in result) else None}
 
@@ -232,7 +260,8 @@ def summary(data):
     waiting = waiting_count(data)
     problems = data["problems"]
     lines = [f"Kanban {data['board']}: done {done} / running {running} / waiting {waiting} / problems {len(problems)}" +
-             (f" / superseded {retired}" if retired else ""),
+             (f" / superseded {retired}" if retired else "") +
+             (f" / capped {data.get('capped', 0)}" if data.get("capped") else ""),
              "rough time left " + ("0 (all watched cards terminal)" if data["all_terminal"] else "UNKNOWN (runtime limits are not estimates)")]
     for p in problems[:9]:
         lines.append(f"{p['card']} {p['kind']}: {short(p['text'])}")

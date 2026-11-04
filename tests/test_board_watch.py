@@ -12,7 +12,8 @@ from conftest import PLUGIN
 
 
 @pytest.fixture
-def reader():
+def reader(monkeypatch):
+    monkeypatch.syspath_prepend(str(PLUGIN / "scripts"))
     spec = importlib.util.spec_from_file_location("board_watch", PLUGIN / "scripts/board_watch.py")
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -76,6 +77,91 @@ def test_ready_age_ignores_heartbeat_and_cap_noise(board, reader):
     assert [p["kind"] for p in result["problems"]] == ["ready_no_worker"]
     event(board, "t_wait", "unblocked", now)
     assert not reader.snapshot("demo", ["t_wait"], now=now)["problems"]
+
+
+@pytest.mark.parametrize("alerted", [False, True])
+def test_live_cap_is_reported_not_a_problem(board, reader, alerted):
+    now = int(time.time()) + 1000  # All synthetic events follow the fixture's creation.
+    with sqlite3.connect(board) as conn:
+        conn.execute("insert into tasks values('t_uncapped','Waiting','builder','ready',?,null,null,null,null,null)",
+                     (now - 900,))
+        conn.execute("insert into tasks values('t_holder','Holder','builder','running',?,null,null,null,null,null)",
+                     (now - 100,))
+    event(board, "t_wait", "promoted", now - 900)
+    event(board, "t_wait", "capped", now - 840,
+          {"scope": "group:builders", "assignee": "builder", "running": 2, "cap": 2})
+    if alerted:
+        event(board, "t_wait", "capped_alerted", now - 1)
+    before = board.read_bytes()
+    data = reader.snapshot("demo", ["t_wait", "t_uncapped"], now=now)
+    cards = {card["id"]: card for card in data["cards"]}
+    assert cards["t_wait"]["capped"] == {
+        "scope": "group:builders", "assignee": "builder", "running": 2, "cap": 2,
+        "waiting_minutes": 14, "alerted": alerted, "label": "capped group:builders 2/2 14m"}
+    assert not cards["t_uncapped"].get("capped")
+    assert data["capped"] == 1 and not data["all_terminal"]
+    assert [(p["card"], p["kind"]) for p in data["problems"]] == [("t_uncapped", "ready_no_worker")]
+    assert "capped 1" in reader.summary(data) and "problems 1" in reader.summary(data)
+    assert board.read_bytes() == before
+
+
+@pytest.mark.parametrize("later", ["promoted", "claimed", "spawn_failed"])
+def test_old_cap_does_not_hide_an_uncapped_ready_problem(board, reader, later):
+    now = int(time.time()) + 1000
+    event(board, "t_wait", "capped", now - 900, {"running": 1, "cap": 1})
+    event(board, "t_wait", later, now - 800)
+    data = reader.snapshot("demo", ["t_wait"], now=now)
+    assert data["capped"] == 0 and not data["cards"][0].get("capped")
+    assert "ready_no_worker" in [p["kind"] for p in data["problems"]]
+
+
+def test_live_cap_waits_until_summary_not_immediate_problem(board, reader, tmp_path):
+    clock = Clock()
+    with sqlite3.connect(board) as conn:
+        conn.execute("update task_events set created_at=0 where task_id='t_wait'")
+    event(board, "t_wait", "promoted", 0)
+    event(board, "t_wait", "capped", 1, {"running": 1, "cap": 1})
+    wake = reader.wait("demo", ["t_wait"], every=900, state_file=tmp_path / "capped-cursor",
+                       clock=clock.time, sleep=clock.sleep)
+    assert wake["reason"] == "summary" and clock.sleeps == [60] * 15
+    assert not wake["new_problems"] and wake["snapshot"]["capped"] == 1
+
+
+def test_live_cap_does_not_hide_spawn_failures(board, reader):
+    now = int(time.time()) + 1000
+    event(board, "t_wait", "spawn_failed", now - 900, {"reason": "cannot start"})
+    event(board, "t_wait", "capped", now - 1, {"running": 1, "cap": 1})
+    data = reader.snapshot("demo", ["t_wait"], now=now)
+    assert data["capped"] == 1
+    assert [p["kind"] for p in data["problems"]] == ["spawn_failed"]
+
+
+@pytest.mark.parametrize("holders", [0, 1])
+def test_abandoned_cap_cannot_hide_a_stalled_ready_card(board, reader, holders):
+    now = int(time.time()) + 30000
+    with sqlite3.connect(board) as conn:
+        conn.execute("update tasks set status=? where id='t_run'", ("running" if holders else "done",))
+    event(board, "t_wait", "promoted", now - 22000)
+    event(board, "t_wait", "capped", now - 21600,
+          {"assignee": "builder", "running": 2, "cap": 2})
+    before = board.read_bytes()
+    data = reader.snapshot("demo", ["t_wait"], now=now)
+    assert data["capped"] == 0
+    assert not data["cards"][0].get("capped")
+    assert [p["kind"] for p in data["problems"]] == ["ready_no_worker"]
+    assert board.read_bytes() == before
+
+
+def test_unrelated_running_card_is_not_a_cap_holder(board, reader):
+    now = int(time.time()) + 1000
+    with sqlite3.connect(board) as conn:
+        conn.execute("update tasks set assignee='other' where id='t_run'")
+    event(board, "t_wait", "promoted", now - 900)
+    event(board, "t_wait", "capped", now - 800,
+          {"assignee": "builder", "running": 1, "cap": 1})
+    data = reader.snapshot("demo", ["t_wait"], now=now)
+    assert data["capped"] == 0
+    assert [p["kind"] for p in data["problems"]] == ["ready_no_worker"]
 
 
 def test_ready_worker_evidence_and_current_run_pointer(board, reader):

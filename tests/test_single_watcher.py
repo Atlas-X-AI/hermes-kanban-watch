@@ -21,7 +21,7 @@ def launch_env(board, isolated_home, tmp_path, monkeypatch):
     bindir = tmp_path / "bin"
     bindir.mkdir()
     for name, content in {
-        "tmux": "import sys\nassert sys.argv[1:] == ['list-panes','-t','=desk:','-F','#{pane_id}']\nprint('%42')\n",
+        "tmux": "import os, sys\nassert sys.argv[1:] == ['list-panes','-s','-t','=desk:','-F','#{pane_id} #{pane_pid}']\nprint('%42 ' + os.environ['PANE_FAKE_ROOT_PID'])\n",
         "hermes": "import sys\nraise SystemExit('fake hermes must not be run by launcher tests')\n",
         "systemd-run": '''import json, os, sys
 from pathlib import Path
@@ -40,7 +40,10 @@ except FileExistsError:
         path = bindir / name
         path.write_text(f"#!{sys.executable}\n" + content)
         path.chmod(0o755)
+    from pane_processes import install_ps
+    install_ps(bindir)
     log = tmp_path / "unit-calls"
+    monkeypatch.delenv("TMUX_PANE", raising=False)
     monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ["PATH"])
     monkeypatch.setenv("UNIT_CALLS", str(log))
     monkeypatch.setenv("HERMES_KANBAN_TASK", "t_parent")
