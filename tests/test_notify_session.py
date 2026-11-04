@@ -444,6 +444,14 @@ PANE_DISPATCHER_R3 = '''import ctypes, os, sys, time
 from pathlib import Path
 work = Path(sys.argv[1])
 work.mkdir(parents=True, exist_ok=True)
+
+def store(name, text):
+    # Atomic publish: start() may read as soon as the path exists, so the
+    # value must land whole (write a temp file, then rename it into place).
+    staged = work / (name + ".tmp")
+    staged.write_text(text)
+    staged.rename(work / name)
+
 deadline = time.monotonic() + 600
 while time.monotonic() < deadline:
     rootname = work / "rootname"
@@ -452,7 +460,7 @@ while time.monotonic() < deadline:
         rootname.unlink()
         assert ctypes.CDLL(None).prctl(15, name.encode(), 0, 0, 0) == 0
         (work / "pid0").write_text(str(os.getpid()))
-        (work / "count").write_text("0")
+        store("count", "0")
         (work / "ready0").touch()
     request = work / "spawn"
     if request.exists():
@@ -472,7 +480,7 @@ while time.monotonic() < deadline:
                 while not (work / f"stop{slot}").exists() and time.monotonic() < end:
                     time.sleep(0.005)
                 os._exit(0)
-        (work / "count").write_text(str(index + len(names)))
+        store("count", str(index + len(names)))
     reap = work / "reap"
     if reap.exists():
         slot = reap.read_text().strip()
