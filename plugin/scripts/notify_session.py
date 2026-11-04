@@ -147,6 +147,11 @@ def revalidate_in_lock(pane_pid, pane_start, agent_pid, agent_start):
     raise ValueError("Recorded agent no longer runs under the pane; nothing queued")
 
 
+def _has_proc():
+    """/proc/<pid>/stat readable for this process: the host exposes /proc."""
+    return _proc_identity(os.getpid()) is not None
+
+
 def notify(session, text, key=None, database=None, *, pane=None, pane_pid=None,
            agent_pid=None, agent_start=None):
     def validate():
@@ -159,10 +164,21 @@ def notify(session, text, key=None, database=None, *, pane=None, pane_pid=None,
         raise ValueError("Supply non-empty summary text, at most 16000 characters")
     found_pane, root_pid, bound_agent, _bound_start = validate()  # Validate before any DB open/write.
     # Start times for the in-lock recheck, read where /proc can observe the
-    # validated processes (always, for live ones). None marks an identity
-    # /proc cannot see: the recheck then revalidates in full instead.
-    pane_proc_start = _proc_start(root_pid)
-    agent_proc_start = _proc_start(bound_agent)
+    # validated processes. An identity /proc cannot see is refused before the
+    # lock: the in-lock recheck is /proc only, never a subprocess, so no
+    # revalidation runs under the lock. On a host with no /proc at all the
+    # pre-lock validation stands alone and the in-lock recheck is skipped; the
+    # window from that validation to the insert is the race this send accepts.
+    have_proc = _has_proc()
+    if have_proc:
+        pane_proc_start = _proc_start(root_pid)
+        agent_proc_start = _proc_start(bound_agent)
+        if pane_proc_start is None:
+            raise ValueError("Recorded pane process is not visible in /proc; nothing queued")
+        if agent_proc_start is None:
+            raise ValueError("Recorded agent process is not visible in /proc; nothing queued")
+    else:
+        pane_proc_start = agent_proc_start = None
     database = Path(database) if database else Path.home() / ".claude/state/messages.db"
     path = database.expanduser().resolve(strict=True)
     key = key or "kanban-watch:" + uuid.uuid4().hex
@@ -175,11 +191,11 @@ def notify(session, text, key=None, database=None, *, pane=None, pane_pid=None,
         # Recheck inside the write lock: the agent may have died while this
         # connection waited for it. /proc only, never a subprocess, so the lock
         # is not held across tmux or ps. Refusal rolls back; nothing is queued.
-        if pane_proc_start is None or agent_proc_start is None:
-            target = f"={session}:.{validate()[0]}"  # Not a /proc-visible pair: revalidate in full.
-        else:
+        # With no /proc on the host there is nothing to re-read: the pre-lock
+        # validation stands alone and the send proceeds on it.
+        if have_proc:
             revalidate_in_lock(root_pid, pane_proc_start, bound_agent, agent_proc_start)
-            target = f"={session}:.{found_pane}"
+        target = f"={session}:.{found_pane}"
         have = conn.execute("select id,target,notify_target,payload from messages where sender=? and dedupe_key=?",
                             ("kanban-watcher", key)).fetchone()
         if have:

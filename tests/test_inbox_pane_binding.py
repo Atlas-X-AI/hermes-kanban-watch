@@ -25,7 +25,7 @@ with Path(os.environ['PANE_CALLS']).open('a') as log:
 if args == ['list-panes', '-t', '=desk:', '-F', '#{pane_id}']:
     print(os.environ.get('ACTIVE_PANE', '%43'))
 elif args == ['list-panes', '-s', '-t', '=desk:', '-F', '#{pane_id} #{pane_pid}']:
-    print(os.environ.get('SESSION_PANES', '%42 4200\\n%43 4300'))
+    print(os.environ.get('SESSION_PANES', '%42 ' + os.environ.get('PANE_FAKE_ROOT_PID', '4200') + chr(10) + '%43 4300'))
 else:
     sys.exit(1)
 ''')
@@ -50,6 +50,7 @@ def rows(inbox):
 @pytest.mark.parametrize("source", ["explicit", "environment"])
 def test_shared_windows_pin_parent_not_active_window(shared_tmux, monkeypatch, active, source):
     _, inbox = shared_tmux
+    root = os.environ["PANE_FAKE_ROOT_PID"]
     monkeypatch.setenv("ACTIVE_PANE", active)
     extra = ["--pane", "%42"] if source == "explicit" else []
     # Explicit --pane must win even over a different inherited pane.
@@ -58,7 +59,7 @@ def test_shared_windows_pin_parent_not_active_window(shared_tmux, monkeypatch, a
     assert out.returncode == 0, out.stderr
     receipt = json.loads(out.stdout)
     config = json.loads(Path(receipt["config"]).read_text())
-    assert (config["pane"], config["pane_pid"]) == ("%42", 4200)
+    assert (config["pane"], config["pane_pid"]) == ("%42", int(root))
     assert not rows(inbox)
     # Neither the helper's inherited pane nor a changed active window may retarget it.
     monkeypatch.setenv("TMUX_PANE", "%43")
@@ -67,8 +68,9 @@ def test_shared_windows_pin_parent_not_active_window(shared_tmux, monkeypatch, a
     assert result.returncode == 0 and "STOP final" in result.stdout, result.stderr
     assert rows(inbox) == [("desk", "=desk:.%42")]
     calls = [json.loads(line) for line in Path(os.environ["PANE_CALLS"]).read_text().splitlines()]
-    # Prepare plus both notify validations (pre-open and inside the write lock).
-    assert len(calls) == 3 and all("-s" in call for call in calls)
+    # Prepare plus the notify validation (pre-open only: the in-lock recheck is
+    # /proc-only and runs no tmux).
+    assert len(calls) == 2 and all("-s" in call for call in calls)
 
 
 @pytest.mark.parametrize("pane", [None, "", "%999", "42", "%42\n", "=desk:.%42"])
@@ -134,7 +136,8 @@ def test_old_config_without_any_binding_key_fails_closed(shared_tmux, monkeypatc
     """A pre-binding config must never rediscover a target, even on a one-pane
     session where auto-resolution would succeed."""
     _, inbox = shared_tmux
-    monkeypatch.setenv("SESSION_PANES", "%42 4200")  # One pane: the old fallback would resolve it.
+    root = os.environ["PANE_FAKE_ROOT_PID"]
+    monkeypatch.setenv("SESSION_PANES", "%42 " + root)  # One pane: the old fallback would resolve it.
     monkeypatch.setenv("TMUX_PANE", "%42")
     out = launch("--prepare-only", "--cards", "t_done")
     assert out.returncode == 0, out.stderr
@@ -153,12 +156,13 @@ def test_old_config_without_any_binding_key_fails_closed(shared_tmux, monkeypatc
 
 def test_one_pane_prepare_records_target_without_environment(shared_tmux, monkeypatch):
     _, inbox = shared_tmux
-    monkeypatch.setenv("SESSION_PANES", "%42 4200")
+    root = os.environ["PANE_FAKE_ROOT_PID"]
+    monkeypatch.setenv("SESSION_PANES", "%42 " + root)
     out = launch("--prepare-only", "--cards", "t_done")
     assert out.returncode == 0, out.stderr
     receipt = json.loads(out.stdout)
     config = json.loads(Path(receipt["config"]).read_text())
-    assert (config["pane"], config["pane_pid"]) == ("%42", 4200)
+    assert (config["pane"], config["pane_pid"]) == ("%42", int(root))
     assert tick(receipt).returncode == 0
     assert rows(inbox) == [("desk", "=desk:.%42")]
 
@@ -166,14 +170,15 @@ def test_one_pane_prepare_records_target_without_environment(shared_tmux, monkey
 @pytest.mark.parametrize("external", [None, "%99"])
 def test_external_caller_accepts_an_unambiguous_one_pane_target(shared_tmux, monkeypatch, external):
     _, inbox = shared_tmux
-    monkeypatch.setenv("SESSION_PANES", "%42 4200")
+    root, agent = os.environ["PANE_FAKE_ROOT_PID"], os.environ["PANE_FAKE_AGENT_PID"]
+    monkeypatch.setenv("SESSION_PANES", "%42 " + root)
     if external:
         monkeypatch.setenv("TMUX_PANE", external)
     out = launch("--prepare-only", "--cards", "t_done")
     assert out.returncode == 0, out.stderr
     receipt = json.loads(out.stdout)
     config = json.loads(Path(receipt["config"]).read_text())
-    assert (config["pane"], config["agent_pid"]) == ("%42", 4201)
+    assert (config["pane"], config["agent_pid"]) == ("%42", int(agent))
     assert tick(receipt).returncode == 0
     assert rows(inbox) == [("desk", "=desk:.%42")]
 

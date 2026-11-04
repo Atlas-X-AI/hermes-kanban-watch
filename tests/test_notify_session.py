@@ -29,7 +29,7 @@ with open(os.environ['TMUX_CALLS'], 'a') as f:
     f.write(json.dumps(sys.argv[1:]) + '\\n')
 if sys.argv[1:] != ['list-panes', '-s', '-t', '=desk:', '-F', '#{pane_id} #{pane_pid}']:
     sys.exit(1)
-print(os.environ.get('TMUX_PANES', '%42 4200'))
+print(os.environ.get('TMUX_PANES', '%42 ' + os.environ.get('PANE_FAKE_ROOT_PID', '4200')))
 ''')
     tmux.chmod(0o755)
     from pane_processes import install_ps
@@ -85,8 +85,9 @@ def test_ambiguous_or_invalid_pane_refused(inbox, monkeypatch, panes):
 
 def test_explicit_pane_in_shared_session(inbox, monkeypatch):
     db, text = inbox
-    monkeypatch.setenv("TMUX_PANES", "%43 4300\n%42 4200")
-    result = notify(text, "desk", "--pane", "%42", "--pane-pid", "4200")
+    other = int(os.environ["PANE_FAKE_AGENT_PID"]) + 10000  # Never a real pane: ambiguity only.
+    monkeypatch.setenv("TMUX_PANES", "%43 " + str(other) + chr(10) + "%42 " + os.environ["PANE_FAKE_ROOT_PID"])
+    result = notify(text, "desk", "--pane", "%42", "--pane-pid", os.environ["PANE_FAKE_ROOT_PID"])
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["notify_target"] == "=desk:.%42"
     with sqlite3.connect(db) as conn:
@@ -158,10 +159,15 @@ def test_dead_unknown_or_unreadable_agents_never_open_inbox(inbox, monkeypatch, 
 
 def test_agent_ancestry_can_include_intermediate_shells(inbox, monkeypatch):
     _, text = inbox
-    monkeypatch.setenv("PANE_PROCESSES", "4200 1 S Mon Nov 2 08:00:00 2026 zsh\n"
-                       "4202 4200 S Mon Nov 2 08:00:01 2026 bash\n"
-                       "4201 4202 S Mon Nov 2 08:01:00 2026 claude")
-    assert notify(text, "desk", "--agent-pid", "4201", "--agent-start", "Mon Nov 2 08:01:00 2026").returncode == 0
+    # Intermediate shells in the ps table, with /proc-visible endpoints: the
+    # recorded agent stays this process; only its ps-table parent chain grows.
+    agent = int(os.environ["PANE_FAKE_AGENT_PID"])
+    root = int(os.environ["PANE_FAKE_ROOT_PID"])
+    monkeypatch.setenv("PANE_PROCESSES", f"{root} 1 S Mon Nov 2 08:00:00 2026 zsh\n"
+                       f"{agent + 1} {root} S Mon Nov 2 08:00:01 2026 bash\n"
+                       f"{agent} {agent + 1} S Mon Nov 2 08:01:00 2026 claude")
+    assert notify(text, "desk", "--agent-pid", str(agent),
+                  "--agent-start", "Mon Nov 2 08:01:00 2026").returncode == 0
 
 
 def test_real_tmux_exact_session_contract_in_owned_server(inbox, tmp_path, monkeypatch):
@@ -689,6 +695,93 @@ def test_slow_tmux_does_not_block_other_inbox_writers(proc_window, monkeypatch, 
     assert waited < 0.5, f"second writer waited {waited}s: the lock is held too long"
 
 
+def test_invisible_agent_after_validation_refuses_without_subprocess(proc_window, monkeypatch, tmp_path):
+    """D10: the agent is reaped after the pre-lock ps and before notify's /proc
+    read. The send must refuse, and no tmux or ps may run under the inbox write
+    lock: tmux is slowed to 3 s, so a second writer with a 1 s busy timeout
+    succeeds only if the lock is never held across a subprocess."""
+    slot, agent = proc_window["start"](["claude"])
+    inbox = proc_window["inbox"]
+    slow = tmp_path / "sbin"
+    slow.mkdir()
+    flag = slow / "slow-on"
+    (slow / "tmux").write_text(f"#!{sys.executable}\nimport os, sys, time\n"
+                               f"if os.path.exists({str(flag)!r}):\n    time.sleep(3)\n"
+                               f"os.execv({REAL_TMUX_R3!r}, [{REAL_TMUX_R3!r}, '-S', "
+                               f"{str(proc_window['base'][2])!r}] + sys.argv[1:])\n")
+    (slow / "ps").write_text(f"#!{sys.executable}\nimport os, subprocess, sys, time\n"
+                             f"if os.path.exists({str(flag)!r}):\n    time.sleep(3)\n"
+                             f"r = subprocess.run([{REAL_PS_R3!r}] + sys.argv[1:], capture_output=True)\n"
+                             "sys.stdout.buffer.write(r.stdout)\n"
+                             "sys.stderr.buffer.write(r.stderr)\n"
+                             f"with open({str(proc_window['pslog'])!r}, 'a') as log:\n"
+                             "    log.write('%.6f' % time.time() + chr(10))\n"
+                             "sys.exit(r.returncode)\n")
+    for wrapper in slow.iterdir():
+        wrapper.chmod(0o755)
+    monkeypatch.setenv("PATH", str(slow) + os.pathsep + os.environ["PATH"])
+    monkeypatch.syspath_prepend(str(PLUGIN / "scripts"))
+    import notify_session as ns
+    pane, pane_pid = ns.resolve_pane("desk")
+    agent_pid, agent_start = ns.resolve_agent(pane_pid)
+    assert agent_pid == agent
+    seen = len(proc_window["pslog"].read_text().splitlines())
+    reaped = []
+    real_run = ns.subprocess.run
+
+    def run_then_reap(argv, *args, **kwargs):
+        result = real_run(argv, *args, **kwargs)
+        if argv[0] == "ps" and not reaped:
+            reaped.append(1)
+            proc_window["stop"](slot)  # Exit and stay a zombie ...
+            proc_window["reap"](slot)  # ... then reaped: /proc no longer has it.
+            flag.touch()  # Any tmux or ps from here on is slowed to 3 s.
+        return result
+
+    monkeypatch.setattr(ns.subprocess, "run", run_then_reap)
+    outcome = {}
+
+    def call():
+        try:
+            outcome["result"] = ns.notify("desk", "probe: invisible agent", "kanban-watch:rr4:invisible",
+                                          inbox, pane=pane, pane_pid=pane_pid,
+                                          agent_pid=agent_pid, agent_start=agent_start)
+        except Exception as exc:  # noqa: BLE001 - any refusal is recorded
+            outcome["error"] = f"{type(exc).__name__}: {exc}"
+
+    worker = threading.Thread(target=call, daemon=True)
+    worker.start()
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline and not reaped:
+        time.sleep(0.002)
+    assert reaped, "the pre-lock ps never returned"
+    time.sleep(0.15)  # notify has reached (and, under a fallback, holds) the write lock.
+    other = REAL_CONNECT_R3(inbox, timeout=1.0, isolation_level=None)
+    writer, waited = None, -1.0
+    t0 = time.monotonic()
+    try:
+        other.execute("begin immediate")
+        other.execute("insert into messages(sender,target,message_type,payload) "
+                      "values('other-writer','x','t','{}')")
+        other.execute("commit")
+        writer, waited = "ok", round(time.monotonic() - t0, 3)
+    except sqlite3.OperationalError as exc:
+        writer, waited = f"OperationalError: {exc}", round(time.monotonic() - t0, 3)
+    finally:
+        other.close()
+    worker.join(40)
+    assert not worker.is_alive()
+    assert writer == "ok", f"second inbox writer locked out after {waited}s: {outcome}"
+    assert waited < 0.5, f"second writer waited {waited}s: the lock is held too long"
+    assert "error" in outcome and "not visible in /proc" in outcome["error"], outcome
+    with sqlite3.connect(inbox) as conn:
+        queued = conn.execute("select count(*) from messages where sender='kanban-watcher'").fetchone()[0]
+    assert queued == 0, outcome
+    # The pre-lock validation is the only ps call: none ran inside the lock.
+    assert len(proc_window["pslog"].read_text().splitlines()) == seen + 1, \
+        "a ps call ran inside the write lock"
+
+
 def test_agent_exit_between_validation_and_lock_refuses(proc_window):
     """D6: the agent exits after the pre-lock validation and before the lock is
     taken (a second connection holds the lock while it exits): refused, nothing
@@ -877,21 +970,38 @@ def test_replaced_and_outside_pane_agents_still_refuse(proc_window):
 
 
 def _r3_fake_swap_refusal(inbox, tmp_path, monkeypatch, table_after):
-    """In-process notify against the fake ps table; while notify is blocked on
-    the write lock, the table changes to table_after. Returns the outcome dict."""
-    if Path("/proc/4200/stat").exists() or Path("/proc/4201/stat").exists():
-        pytest.skip("host pids 4200/4201 exist; the fake tier needs them absent")
+    """In-process notify against the fake ps table, with a patched /proc reader
+    that speaks the same fake PIDs; while notify is blocked on the write lock,
+    the table changes to table_after. Returns the outcome dict. No host PID is
+    assumed absent: the fake identities live only in the reader."""
     monkeypatch.setenv("PANE_PROCESSES", FAKE_TABLE_R3)
     logging_ps = tmp_path / "bin/ps"
     logging_ps.write_text(f"#!{sys.executable}\n" +
                           "import os, sys, time\n"
-                          f"print(os.environ.get('PANE_PROCESSES'))\n"
+                          "print(os.environ.get('PANE_PROCESSES'))\n"
                           f"with open({str(tmp_path / 'ps-calls-r3')!r}, 'a') as log:\n"
-                          "    log.write('%.6f\\n' % time.time())\n")
+                          "    log.write('%.6f' % time.time() + chr(10))\n")
     logging_ps.chmod(0o755)
     monkeypatch.setenv("PATH", str(tmp_path / "bin") + os.pathsep + os.environ["PATH"])
     monkeypatch.syspath_prepend(str(PLUGIN / "scripts"))
     import notify_session as ns
+    real_identity = ns._proc_identity
+    fake = {4200: ("S", 1, 111), 4201: ("S", 4200, 222)}
+
+    def fake_identity(pid):
+        # Fake PIDs speak the table; every other PID (this process included,
+        # for the has-/proc probe) reads the host /proc as before.
+        return fake.get(int(pid), real_identity(pid))
+
+    def fake_start(pid):
+        identity = fake_identity(pid)
+        return None if identity is None else identity[2]
+
+    monkeypatch.setattr(ns, "_proc_identity", fake_identity)
+    monkeypatch.setattr(ns, "_proc_start", fake_start)
+    # The fake tmux speaks the same fake pane PID; the host /proc is bypassed
+    # for the pair under test, so no host PID is assumed absent.
+    monkeypatch.setenv("TMUX_PANES", "%42 4200")
     inbox = inbox[0]  # The fixture yields (db, text); only the database matters here.
     outcome = {}
 
@@ -910,6 +1020,8 @@ def _r3_fake_swap_refusal(inbox, tmp_path, monkeypatch, table_after):
     _r3_wait_ps(tmp_path / "ps-calls-r3", 0)  # The pre-lock ps has returned.
     time.sleep(0.15)  # The parse finishes; notify is blocked on the write lock.
     monkeypatch.setenv("PANE_PROCESSES", table_after)
+    # The same-PID reuse shape: the agent PID survives with a new start time.
+    fake[4201] = ("S", 4200, 333)
     holder.execute("commit")
     holder.close()
     worker.join(15)
@@ -918,12 +1030,13 @@ def _r3_fake_swap_refusal(inbox, tmp_path, monkeypatch, table_after):
 
 
 def test_identity_swap_inside_the_lock_refuses(inbox, tmp_path, monkeypatch):
-    """D6 (identities /proc cannot observe): when the ps table changes between
-    the pre-lock validation and the in-lock recheck, the send is refused."""
+    """D6 (the same-PID reuse shape, /proc-pinned): the agent PID survives with
+    a new start time while notify waits on the write lock; the send is refused
+    by the in-lock start-time comparison."""
     outcome = _r3_fake_swap_refusal(inbox, tmp_path, monkeypatch, FAKE_TABLE_SWAPPED_R3)
     database = inbox[0]
     assert "result" not in outcome, outcome
-    assert "Recorded agent process changed" in outcome["error"], outcome
+    assert "Recorded process identity changed" in outcome["error"], outcome
     assert not _r3_rows(database)
     assert _r3_lock_free(database)
 

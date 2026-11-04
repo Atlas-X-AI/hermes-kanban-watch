@@ -21,7 +21,7 @@ def launch_env(board, isolated_home, tmp_path, monkeypatch):
     bindir = tmp_path / "bin"
     bindir.mkdir()
     for name, content in {
-        "tmux": "import sys\nassert sys.argv[1:] == ['list-panes','-s','-t','=desk:','-F','#{pane_id} #{pane_pid}']\nprint('%42 4200')\n",
+        "tmux": "import os, sys\nassert sys.argv[1:] == ['list-panes','-s','-t','=desk:','-F','#{pane_id} #{pane_pid}']\nprint('%42 ' + os.environ['PANE_FAKE_ROOT_PID'])\n",
         "hermes": "import sys\nraise SystemExit('fake hermes must not be run by launcher tests')\n",
         "systemd-run": '''import json, os, sys
 from pathlib import Path

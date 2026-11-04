@@ -24,6 +24,11 @@ def isolated_home(tmp_path, monkeypatch):
         monkeypatch.setenv(f"XDG_{kind}_HOME", str(tmp_path / f"xdg-{kind.lower()}"))
     # A test must explicitly install its fake sender; never inherit an outbound route.
     monkeypatch.setenv("KANBAN_WATCH_DISCORD_SENDER", str(home / "no-discord-sender"))
+    # /proc-visible fake identities for the fake-ps tier: the pane root is this
+    # process's parent and the agent is this process, so the in-lock /proc
+    # recheck can observe both without depending on any host PID being absent.
+    monkeypatch.setenv("PANE_FAKE_ROOT_PID", str(os.getppid()))
+    monkeypatch.setenv("PANE_FAKE_AGENT_PID", str(os.getpid()))
     # Never reach a real loopback relay: port 9 (discard) refuses; tests install a fake relay.
     monkeypatch.setenv("KANBAN_WATCH_DISCORD_RELAY", "http://127.0.0.1:9")
     for name in tuple(os.environ):
