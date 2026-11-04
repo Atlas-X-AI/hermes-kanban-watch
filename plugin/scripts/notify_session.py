@@ -90,17 +90,77 @@ def resolve_agent(pane_pid, agent_pid=None, agent_start=None):
     return found, started
 
 
+def _proc_identity(pid):
+    """(state, parent pid, start time) from /proc/<pid>/stat, or None when gone.
+
+    Parsed from the LAST ')' because the command name can contain spaces and
+    parentheses; the tokens after it are stat field 3 (state), field 4 (parent)
+    and field 22 (start time).
+    """
+    try:
+        fields = Path(f"/proc/{int(pid)}/stat").read_text().rsplit(")", 1)[1].split()
+    except (FileNotFoundError, ProcessLookupError, ValueError, OSError):
+        return None
+    if len(fields) < 20:
+        return None
+    try:
+        return fields[0], int(fields[1]), int(fields[19])
+    except ValueError:
+        return None
+
+
+def _proc_start(pid):
+    identity = _proc_identity(pid)
+    return None if identity is None else identity[2]
+
+
+def revalidate_in_lock(pane_pid, pane_start, agent_pid, agent_start):
+    """Recheck the recorded identities inside the write lock, /proc only.
+
+    No subprocess runs here: tmux and ps are too slow to hold the inbox write
+    lock across. Refuse when either process is gone, the agent is a zombie,
+    either start time changed, or the agent's parent chain (stat field 4) no
+    longer reaches the recorded pane process.
+    """
+    pane_now = _proc_identity(pane_pid)
+    agent_now = _proc_identity(agent_pid)
+    if pane_now is None:
+        raise ValueError("Recorded pane process is gone; nothing queued")
+    if agent_now is None:
+        raise ValueError("Recorded agent process is gone; nothing queued")
+    if agent_now[0] in {"Z", "X"}:
+        raise ValueError("Recorded agent process is not live; nothing queued")
+    if pane_now[2] != pane_start or agent_now[2] != agent_start:
+        raise ValueError("Recorded process identity changed; nothing queued")
+    seen = set()
+    pid = agent_now[1]  # The agent's parent: /proc/<pid>/stat field 4.
+    while pid not in seen and len(seen) <= 64:
+        if pid == pane_pid:
+            return
+        parent = _proc_identity(pid)
+        if parent is None:
+            break
+        seen.add(pid)
+        pid = parent[1]
+    raise ValueError("Recorded agent no longer runs under the pane; nothing queued")
+
+
 def notify(session, text, key=None, database=None, *, pane=None, pane_pid=None,
            agent_pid=None, agent_start=None):
     def validate():
         # Exact target and live agent, re-run from scratch on every call.
         found_pane, root_pid = resolve_pane(session, pane, pane_pid)
-        resolve_agent(root_pid, agent_pid, agent_start)
-        return found_pane
+        found_agent, found_start = resolve_agent(root_pid, agent_pid, agent_start)
+        return found_pane, root_pid, found_agent, found_start
 
     if not isinstance(text, str) or not text.strip() or len(text) > 16000:
         raise ValueError("Supply non-empty summary text, at most 16000 characters")
-    validate()  # Validate before any DB open/write.
+    found_pane, root_pid, bound_agent, _bound_start = validate()  # Validate before any DB open/write.
+    # Start times for the in-lock recheck, read where /proc can observe the
+    # validated processes (always, for live ones). None marks an identity
+    # /proc cannot see: the recheck then revalidates in full instead.
+    pane_proc_start = _proc_start(root_pid)
+    agent_proc_start = _proc_start(bound_agent)
     database = Path(database) if database else Path.home() / ".claude/state/messages.db"
     path = database.expanduser().resolve(strict=True)
     key = key or "kanban-watch:" + uuid.uuid4().hex
@@ -110,9 +170,14 @@ def notify(session, text, key=None, database=None, *, pane=None, pane_pid=None,
                        "project_channel": {"type": "project_channel_message", "render": text}}, ensure_ascii=False)
     with closing(sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, timeout=2)) as conn:
         conn.execute("begin immediate")
-        # Revalidate inside the write lock: the agent may have died while this
-        # connection waited for it. Refusal rolls back; nothing is queued.
-        target = f"={session}:.{validate()}"  # Refused by tmux if the pane moves to another session.
+        # Recheck inside the write lock: the agent may have died while this
+        # connection waited for it. /proc only, never a subprocess, so the lock
+        # is not held across tmux or ps. Refusal rolls back; nothing is queued.
+        if pane_proc_start is None or agent_proc_start is None:
+            target = f"={session}:.{validate()[0]}"  # Not a /proc-visible pair: revalidate in full.
+        else:
+            revalidate_in_lock(root_pid, pane_proc_start, bound_agent, agent_proc_start)
+            target = f"={session}:.{found_pane}"
         have = conn.execute("select id,target,notify_target,payload from messages where sender=? and dedupe_key=?",
                             ("kanban-watcher", key)).fetchone()
         if have:

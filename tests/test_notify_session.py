@@ -420,3 +420,485 @@ def test_agent_exit_while_notify_waits_on_write_lock_queues_nothing(inbox, tmp_p
                 process.communicate(timeout=5)
         holder.close()
         subprocess.run([*base, "kill-server"], capture_output=True, timeout=5, check=True)
+
+
+# --- Round 3: the /proc-only recheck inside the inbox write lock. ---
+
+import threading  # noqa: E402
+import time  # noqa: E402
+
+REAL_TMUX_R3 = shutil.which("tmux", path=os.defpath)
+REAL_PS_R3 = shutil.which("ps", path=os.defpath)
+REAL_CONNECT_R3 = sqlite3.connect
+
+# The pane process is a dispatcher: it forks prctl-named children on request and
+# never reaps them unless asked, so an exited child is a real zombie under an
+# unchanged pane root until the test asks for it to be reaped.
+PANE_DISPATCHER_R3 = '''import ctypes, os, sys, time
+from pathlib import Path
+work = Path(sys.argv[1])
+work.mkdir(parents=True, exist_ok=True)
+deadline = time.monotonic() + 600
+while time.monotonic() < deadline:
+    request = work / "spawn"
+    if request.exists():
+        names = request.read_text().split("|")
+        request.unlink()
+        try:
+            index = int((work / "count").read_text())
+        except (FileNotFoundError, ValueError):
+            index = 0
+        for offset, name in enumerate(names):
+            slot = index + offset
+            if os.fork() == 0:
+                assert ctypes.CDLL(None).prctl(15, name.encode(), 0, 0, 0) == 0
+                (work / f"pid{slot}").write_text(str(os.getpid()))
+                (work / f"ready{slot}").touch()
+                end = time.monotonic() + 600
+                while not (work / f"stop{slot}").exists() and time.monotonic() < end:
+                    time.sleep(0.005)
+                os._exit(0)
+        (work / "count").write_text(str(index + len(names)))
+    reap = work / "reap"
+    if reap.exists():
+        slot = reap.read_text().strip()
+        reap.unlink()
+        try:
+            os.waitpid(int((work / f"pid{slot}").read_text()), os.WNOHANG)
+        except (FileNotFoundError, ValueError, ChildProcessError):
+            pass
+    time.sleep(0.005)
+'''
+
+
+def _r3_state_of(pid):
+    """The state letter from /proc/<pid>/stat parsed after the last ')', or 'gone'."""
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except (FileNotFoundError, ProcessLookupError):
+        return "gone"
+
+
+def _r3_wait_state(pid, want, timeout=5):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _r3_state_of(pid) in want:
+            return
+        time.sleep(0.01)
+    pytest.fail(f"pid {pid} never reached {want} (last state {_r3_state_of(pid)})")
+
+
+def _r3_rows(inbox):
+    with sqlite3.connect(inbox) as conn:
+        return conn.execute("select id from messages").fetchall()
+
+
+def _r3_lock_free(inbox, timeout=1.0):
+    """A second connection's begin immediate succeeds at once (D8)."""
+    probe = sqlite3.connect(inbox, timeout=timeout, isolation_level=None)
+    try:
+        probe.execute("begin immediate")
+        probe.execute("rollback")
+        return True
+    except sqlite3.OperationalError:
+        return False
+    finally:
+        probe.close()
+
+
+def _r3_wait_ps(pslog, previous, timeout=30):
+    """Block until one more logged ps call has returned."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        lines = len(pslog.read_text().splitlines()) if pslog.exists() else 0
+        if lines > previous:
+            return lines
+        time.sleep(0.002)
+    pytest.fail("notify never ran its pre-lock ps validation")
+
+
+@pytest.fixture
+def proc_window(inbox, tmp_path, monkeypatch):
+    """Real tmux and a logged real ps on PATH, one disposable 'desk' session whose
+    pane root forks prctl-named children on request. start(names) returns the
+    first agent's (slot, pid); stop(slot) leaves a zombie; reap(slot) reaps it."""
+    if REAL_TMUX_R3 is None or REAL_PS_R3 is None or sys.platform != "linux":
+        pytest.skip("Linux, tmux and ps required for the in-lock /proc recheck contract")
+    db, text = inbox
+    socket = tmp_path / "tmux.sock"
+    base = [REAL_TMUX_R3, "-S", str(socket)]
+    work = tmp_path / "pane"
+    work.mkdir()
+    pslog = tmp_path / "ps-log"
+    dispatcher = tmp_path / "pane_dispatcher.py"
+    dispatcher.write_text(PANE_DISPATCHER_R3)
+    created = subprocess.run([*base, "-f", "/dev/null", "new-session", "-d", "-s", "desk",
+                              " ".join(shlex.quote(part) for part in
+                                       [sys.executable, str(dispatcher), str(work)])],
+                             capture_output=True, text=True, timeout=5)
+    assert created.returncode == 0, created.stderr
+
+    def start(names):
+        (work / "spawn.new").write_text("|".join(names))
+        (work / "spawn.new").rename(work / "spawn")
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not (work / "count").exists():
+            time.sleep(0.01)
+        count = int((work / "count").read_text())
+        assert count >= 1, "dispatcher never spawned the synthetic agents"
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not all((work / f"ready{i}").exists()
+                                                      for i in range(count)):
+            time.sleep(0.01)
+        assert all((work / f"ready{i}").exists() for i in range(count)), "agents not ready"
+        return 0, int((work / "pid0").read_text())
+
+    def stop(slot):
+        (work / f"stop{slot}").touch()
+        _r3_wait_state(int((work / f"pid{slot}").read_text()), {"Z", "gone"})
+
+    def reap(slot):
+        (work / "reap").write_text(str(slot))
+        deadline = time.monotonic() + 5
+        pid = int((work / f"pid{slot}").read_text())
+        while time.monotonic() < deadline and _r3_state_of(pid) != "gone":
+            time.sleep(0.01)
+        assert _r3_state_of(pid) == "gone", f"pid {pid} was never reaped"
+
+    try:
+        bindir = tmp_path / "bin"
+        (bindir / "tmux").write_text(f"#!{sys.executable}\nimport os, sys\n"
+                                     f"os.execv({REAL_TMUX_R3!r}, {base!r} + sys.argv[1:])\n")
+        (bindir / "ps").write_text(f"#!{sys.executable}\n" +
+                                   "import subprocess, sys, time\n"
+                                   f"r = subprocess.run([{REAL_PS_R3!r}] + sys.argv[1:], capture_output=True)\n"
+                                   "sys.stdout.buffer.write(r.stdout)\n"
+                                   "sys.stderr.buffer.write(r.stderr)\n"
+                                   f"with open({str(pslog)!r}, 'a') as log:\n"
+                                   "    log.write('%.6f\\n' % time.time())\n"
+                                   "sys.exit(r.returncode)\n")
+        for wrapper in bindir.iterdir():
+            wrapper.chmod(0o755)
+        monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ["PATH"])
+        monkeypatch.syspath_prepend(str(PLUGIN / "scripts"))
+        yield {"inbox": db, "text": text, "base": base, "work": work,
+               "pslog": pslog, "start": start, "stop": stop, "reap": reap}
+    finally:
+        subprocess.run([*base, "kill-server"], capture_output=True, timeout=5, check=True)
+
+
+def _r3_trace(ns, monkeypatch):
+    """Trace notify's SQL: the waiting event fires on begin immediate, and the
+    event list records when the insert starts. Connections made by the test
+    itself use _r3_untraced_connect."""
+    events, waiting = [], threading.Event()
+
+    class Traced(sqlite3.Connection):
+        def execute(self, sql, *args):
+            if sql.strip().lower() == "begin immediate":
+                waiting.set()
+            events.append((sql.split()[0].lower() + "-start", time.time()))
+            result = super().execute(sql, *args)
+            events.append((sql.split()[0].lower() + "-end", time.time()))
+            return result
+
+    def connect(*args, **kwargs):
+        kwargs["factory"] = Traced
+        return REAL_CONNECT_R3(*args, **kwargs)
+
+    monkeypatch.setattr(ns.sqlite3, "connect", connect)
+    return events, waiting
+
+
+def test_slow_tmux_does_not_block_other_inbox_writers(proc_window, monkeypatch, tmp_path):
+    """D7: with tmux and ps slowed to 3 s, a second inbox writer that starts just
+    after notify's begin immediate, with a 1 s busy timeout, must succeed: inside
+    the write lock only /proc is read, never a subprocess."""
+    slot, agent = proc_window["start"](["claude"])
+    inbox = proc_window["inbox"]
+    slow = tmp_path / "sbin"
+    slow.mkdir()
+    flag = slow / "slow-on"
+    (slow / "tmux").write_text(f"#!{sys.executable}\nimport os, sys, time\n"
+                               f"if os.path.exists({str(flag)!r}):\n    time.sleep(3)\n"
+                               f"os.execv({REAL_TMUX_R3!r}, [{REAL_TMUX_R3!r}, '-S', "
+                               f"{str(proc_window['base'][2])!r}] + sys.argv[1:])\n")
+    (slow / "ps").write_text(f"#!{sys.executable}\nimport os, subprocess, sys, time\n"
+                             f"if os.path.exists({str(flag)!r}):\n    time.sleep(3)\n"
+                             f"r = subprocess.run([{REAL_PS_R3!r}] + sys.argv[1:], capture_output=True)\n"
+                             "sys.stdout.buffer.write(r.stdout)\n"
+                             "sys.stderr.buffer.write(r.stderr)\n"
+                             f"with open({str(proc_window['pslog'])!r}, 'a') as log:\n"
+                             "    log.write('%.6f\\n' % time.time())\n"
+                             "sys.exit(r.returncode)\n")
+    for wrapper in slow.iterdir():
+        wrapper.chmod(0o755)
+    monkeypatch.setenv("PATH", str(slow) + os.pathsep + os.environ["PATH"])
+    import notify_session as ns
+    events, waiting = _r3_trace(ns, monkeypatch)
+    pane, pane_pid = ns.resolve_pane("desk")
+    agent_pid, agent_start = ns.resolve_agent(pane_pid)
+    assert agent_pid == agent
+    flag.touch()
+    outcome = {}
+
+    def call():
+        try:
+            outcome["result"] = ns.notify("desk", "probe: slow tmux", "kanban-watch:rr3:slow",
+                                          inbox, pane=pane, pane_pid=pane_pid,
+                                          agent_pid=agent_pid, agent_start=agent_start)
+        except Exception as exc:  # noqa: BLE001 - any outcome is recorded
+            outcome["error"] = f"{type(exc).__name__}: {exc}"
+
+    worker = threading.Thread(target=call, daemon=True)
+    worker.start()
+    assert waiting.wait(30), "notify never took the write lock"
+    other = REAL_CONNECT_R3(inbox, timeout=1.0, isolation_level=None)
+    writer, waited = None, -1.0
+    try:
+        t0 = time.monotonic()
+        other.execute("begin immediate")
+        other.execute("insert into messages(sender,target,message_type,payload) "
+                      "values('other-writer','x','t','{}')")
+        other.execute("commit")
+        writer, waited = "ok", round(time.monotonic() - t0, 3)
+    except sqlite3.OperationalError as exc:
+        writer = f"OperationalError: {exc}"
+    finally:
+        other.close()
+    worker.join(45)
+    assert not worker.is_alive()
+    assert "result" in outcome, outcome  # Control: the agent is alive, notify still queues.
+    assert writer == "ok", f"second inbox writer locked out after {waited}s: {outcome}"
+    assert waited < 0.5, f"second writer waited {waited}s: the lock is held too long"
+
+
+def test_agent_exit_between_validation_and_lock_refuses(proc_window):
+    """D6: the agent exits after the pre-lock validation and before the lock is
+    taken (a second connection holds the lock while it exits): refused, nothing
+    queued, the write lock is free again after the refusal, and the in-lock
+    recheck ran no subprocess (exactly one ps call: the pre-lock validation)."""
+    slot, agent = proc_window["start"](["claude"])
+    inbox = proc_window["inbox"]
+    import notify_session as ns
+    pane, pane_pid = ns.resolve_pane("desk")
+    agent_pid, agent_start = ns.resolve_agent(pane_pid)
+    assert agent_pid == agent
+    holder = REAL_CONNECT_R3(inbox, timeout=5, isolation_level=None)
+    holder.execute("begin immediate")
+    outcome = {}
+    seen = len(proc_window["pslog"].read_text().splitlines())
+
+    def call():
+        try:
+            outcome["result"] = ns.notify("desk", "probe: exit window", "kanban-watch:rr3:exit",
+                                          inbox, pane=pane, pane_pid=pane_pid,
+                                          agent_pid=agent_pid, agent_start=agent_start)
+        except Exception as exc:  # noqa: BLE001 - any refusal is recorded
+            outcome["error"] = f"{type(exc).__name__}: {exc}"
+
+    worker = threading.Thread(target=call, daemon=True)
+    worker.start()
+    _r3_wait_ps(proc_window["pslog"], seen)  # The pre-lock ps has returned.
+    time.sleep(0.15)  # The parse finishes; notify is blocked on the write lock.
+    proc_window["stop"](slot)  # The child exits and stays an unreaped zombie.
+    _r3_wait_state(agent, {"Z"})
+    holder.execute("commit")
+    holder.close()
+    worker.join(15)
+    assert not worker.is_alive()
+    assert "result" not in outcome, outcome
+    assert "nothing queued" in outcome["error"], outcome
+    assert not _r3_rows(inbox), outcome
+    assert _r3_lock_free(inbox), "the inbox write lock is not free after the refusal"
+    assert not Path(str(inbox) + "-journal").exists(), "a journal was left after the refusal"
+    # No subprocess inside the lock: the pre-lock validation is the only ps call.
+    assert len(proc_window["pslog"].read_text().splitlines()) == seen + 1, \
+        "a ps call ran inside the write lock"
+
+
+def test_replaced_agent_with_same_name_and_new_start_time_refuses(proc_window, monkeypatch):
+    """D6: while notify waits on the write lock, the recorded agent exits and a
+    same-named replacement with a new pid and start time appears: refused inside
+    the lock by the /proc identity, with no ps call inside the lock."""
+    slot, agent = proc_window["start"](["claude"])
+    inbox = proc_window["inbox"]
+    import notify_session as ns
+    pane, pane_pid = ns.resolve_pane("desk")
+    agent_pid, agent_start = ns.resolve_agent(pane_pid)
+    assert agent_pid == agent
+    holder = REAL_CONNECT_R3(inbox, timeout=5, isolation_level=None)
+    holder.execute("begin immediate")
+    outcome = {}
+    seen = len(proc_window["pslog"].read_text().splitlines())
+
+    def call():
+        try:
+            outcome["result"] = ns.notify("desk", "probe: replaced agent", "kanban-watch:rr3:replaced",
+                                          inbox, pane=pane, pane_pid=pane_pid,
+                                          agent_pid=agent_pid, agent_start=agent_start)
+        except Exception as exc:  # noqa: BLE001 - any refusal is recorded
+            outcome["error"] = f"{type(exc).__name__}: {exc}"
+
+    worker = threading.Thread(target=call, daemon=True)
+    worker.start()
+    _r3_wait_ps(proc_window["pslog"], seen)  # The pre-lock ps saw the original agent.
+    time.sleep(0.15)  # The parse finishes; notify is blocked on the write lock.
+    proc_window["stop"](slot)  # The recorded agent exits and stays a zombie.
+    proc_window["start"](["claude"])  # A same-named replacement under the same pane.
+    holder.execute("commit")
+    holder.close()
+    worker.join(15)
+    assert not worker.is_alive()
+    assert "result" not in outcome, outcome
+    assert "nothing queued" in outcome["error"], outcome
+    assert not _r3_rows(inbox), outcome
+    assert _r3_lock_free(inbox)
+    assert len(proc_window["pslog"].read_text().splitlines()) == seen + 1, \
+        "a ps call ran inside the write lock"
+
+
+def test_proc_recheck_refusals_are_pinned(proc_window, monkeypatch):
+    """The /proc recheck refuses on each axis: the agent gone, a zombie, a
+    changed agent or pane start time, and a broken parent chain."""
+    import notify_session as ns
+    slot, agent = proc_window["start"](["claude"])
+    pane, pane_pid = ns.resolve_pane("desk")
+    agent_pid, agent_start = ns.resolve_agent(pane_pid)
+    agent_identity = ns._proc_identity(agent_pid)
+    pane_identity = ns._proc_identity(pane_pid)
+    assert agent_identity and pane_identity and agent_identity[0] not in {"Z", "X"}
+    # Control: the real identities pass.
+    ns.revalidate_in_lock(pane_pid, pane_identity[2], agent_pid, agent_identity[2])
+    # Forged agent start time (the same pid reused by a new process).
+    with pytest.raises(ValueError, match="nothing queued"):
+        ns.revalidate_in_lock(pane_pid, pane_identity[2], agent_pid, agent_identity[2] - 1)
+    # Forged pane start time (the pane process was replaced).
+    with pytest.raises(ValueError, match="nothing queued"):
+        ns.revalidate_in_lock(pane_pid, pane_identity[2] - 1, agent_pid, agent_identity[2])
+    # The parent chain no longer reaches the recorded pane process.
+    with pytest.raises(ValueError, match="nothing queued"):
+        ns.revalidate_in_lock(os.getpid(), ns._proc_identity(os.getpid())[2],
+                              agent_pid, agent_identity[2])
+    # The agent exited: a real zombie under the unchanged pane root.
+    proc_window["stop"](slot)
+    _r3_wait_state(agent_pid, {"Z"})
+    with pytest.raises(ValueError, match="nothing queued"):
+        ns.revalidate_in_lock(pane_pid, pane_identity[2], agent_pid, agent_identity[2])
+    # The agent was reaped: /proc no longer has it at all.
+    proc_window["reap"](slot)
+    with pytest.raises(ValueError, match="nothing queued"):
+        ns.revalidate_in_lock(pane_pid, pane_identity[2], agent_pid, agent_identity[2])
+
+
+FAKE_TABLE_R3 = ("4200 1 S Mon Nov 2 08:00:00 2026 zsh\n"
+                 "4201 4200 S Mon Nov 2 08:01:00 2026 claude")
+FAKE_TABLE_SWAPPED_R3 = ("4200 1 S Mon Nov 2 08:00:00 2026 zsh\n"
+                         "4201 4200 S Mon Nov 2 08:02:00 2026 claude")
+
+
+def _r3_fake_swap_refusal(inbox, tmp_path, monkeypatch, table_after):
+    """In-process notify against the fake ps table; while notify is blocked on
+    the write lock, the table changes to table_after. Returns the outcome dict."""
+    if Path("/proc/4200/stat").exists() or Path("/proc/4201/stat").exists():
+        pytest.skip("host pids 4200/4201 exist; the fake tier needs them absent")
+    monkeypatch.setenv("PANE_PROCESSES", FAKE_TABLE_R3)
+    logging_ps = tmp_path / "bin/ps"
+    logging_ps.write_text(f"#!{sys.executable}\n" +
+                          "import os, sys, time\n"
+                          f"print(os.environ.get('PANE_PROCESSES'))\n"
+                          f"with open({str(tmp_path / 'ps-calls-r3')!r}, 'a') as log:\n"
+                          "    log.write('%.6f\\n' % time.time())\n")
+    logging_ps.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path / "bin") + os.pathsep + os.environ["PATH"])
+    monkeypatch.syspath_prepend(str(PLUGIN / "scripts"))
+    import notify_session as ns
+    inbox = inbox[0]  # The fixture yields (db, text); only the database matters here.
+    outcome = {}
+
+    def call():
+        try:
+            outcome["result"] = ns.notify("desk", "probe: table swap", "kanban-watch:rr3:swap",
+                                          inbox, pane="%42", pane_pid=4200,
+                                          agent_pid=4201, agent_start="Mon Nov 2 08:01:00 2026")
+        except Exception as exc:  # noqa: BLE001 - any refusal is recorded
+            outcome["error"] = f"{type(exc).__name__}: {exc}"
+
+    holder = REAL_CONNECT_R3(inbox, timeout=5, isolation_level=None)
+    holder.execute("begin immediate")
+    worker = threading.Thread(target=call, daemon=True)
+    worker.start()
+    _r3_wait_ps(tmp_path / "ps-calls-r3", 0)  # The pre-lock ps has returned.
+    time.sleep(0.15)  # The parse finishes; notify is blocked on the write lock.
+    monkeypatch.setenv("PANE_PROCESSES", table_after)
+    holder.execute("commit")
+    holder.close()
+    worker.join(15)
+    assert not worker.is_alive()
+    return outcome
+
+
+def test_identity_swap_inside_the_lock_refuses(inbox, tmp_path, monkeypatch):
+    """D6 (identities /proc cannot observe): when the ps table changes between
+    the pre-lock validation and the in-lock recheck, the send is refused."""
+    outcome = _r3_fake_swap_refusal(inbox, tmp_path, monkeypatch, FAKE_TABLE_SWAPPED_R3)
+    database = inbox[0]
+    assert "result" not in outcome, outcome
+    assert "Recorded agent process changed" in outcome["error"], outcome
+    assert not _r3_rows(database)
+    assert _r3_lock_free(database)
+
+
+def test_inprocess_refusal_leaves_the_inbox_lock_free_at_once(inbox, tmp_path, monkeypatch):
+    """D8: after an in-process refusal a second connection's begin immediate
+    succeeds at once: the refusal rolled back and released the write lock."""
+    outcome = _r3_fake_swap_refusal(inbox, tmp_path, monkeypatch, FAKE_TABLE_SWAPPED_R3)
+    database = inbox[0]
+    assert "result" not in outcome, outcome
+    probe = REAL_CONNECT_R3(database, timeout=0, isolation_level=None)
+    try:
+        t0 = time.monotonic()
+        probe.execute("begin immediate")
+        elapsed = time.monotonic() - t0
+        probe.execute("rollback")
+    except sqlite3.OperationalError as exc:
+        pytest.fail(f"the write lock is still held after the refusal: {exc}")
+    finally:
+        probe.close()
+    assert elapsed < 0.1, f"begin immediate took {elapsed:.3f}s"
+    assert not Path(str(database) + "-journal").exists(), "a journal was left after the refusal"
+
+
+def test_measured_window_from_proc_read_to_insert(proc_window, monkeypatch, tmp_path):
+    """The remaining window, from the in-lock /proc read to the insert, timed
+    over 15 real sends. Printout: 'rr3-window-ms min/median/max'."""
+    import statistics
+
+    proc_window["start"](["claude"])
+    inbox = proc_window["inbox"]
+    import notify_session as ns
+    events, _waiting = _r3_trace(ns, monkeypatch)
+    real_revalidate = ns.revalidate_in_lock
+    marks = []
+
+    def timed(pane_pid, pane_start, agent_pid, agent_start):
+        result = real_revalidate(pane_pid, pane_start, agent_pid, agent_start)
+        marks.append(time.time())  # The /proc reads have just finished.
+        return result
+
+    monkeypatch.setattr(ns, "revalidate_in_lock", timed)
+    pane, pane_pid = ns.resolve_pane("desk")
+    agent_pid, agent_start = ns.resolve_agent(pane_pid)
+    samples = []
+    for i in range(15):
+        events.clear()
+        ns.notify("desk", f"probe: window {i}", f"kanban-watch:rr3:timing:{i}", inbox,
+                  pane=pane, pane_pid=pane_pid, agent_pid=agent_pid, agent_start=agent_start)
+        insert_start = [t for kind, t in events if kind == "insert-start"]
+        assert insert_start and marks, "the traced insert never ran"
+        samples.append((insert_start[0] - marks[-1]) * 1000)
+    summary = {key: round(fn(samples), 3) for key, fn in
+               (("min", min), ("median", statistics.median), ("max", max))}
+    print(f"rr3-window-ms min/median/max: {summary['min']}/{summary['median']}/{summary['max']}")
+    assert 0 <= summary["min"] <= summary["median"] <= summary["max"] < 500, summary
+    assert len(_r3_rows(inbox)) == 15
