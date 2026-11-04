@@ -304,3 +304,119 @@ def test_zombie_agent_under_unchanged_pane_root_is_never_live(inbox, tmp_path, m
             resolve_agent(pane_pid, agent_pid, agent_start)
     finally:
         subprocess.run([*base, "kill-server"], capture_output=True, timeout=5, check=True)
+
+
+def test_agent_exit_while_notify_waits_on_write_lock_queues_nothing(inbox, tmp_path, monkeypatch):
+    """The bound agent is revalidated inside the inbox write lock. A second
+    connection holds the write lock; the bound agent exits while notify waits
+    on it: refuse, queue nothing. Control: the agent stays alive and the row is
+    queued once the lock is released."""
+    import time
+
+    real_tmux = shutil.which("tmux", path=os.defpath)
+    real_ps = shutil.which("ps", path=os.defpath)
+    if real_tmux is None or real_ps is None or sys.platform != "linux":
+        pytest.skip("Linux, tmux and ps required for the in-lock revalidation contract")
+    db, text = inbox
+    socket = tmp_path / "tmux.sock"
+    base = [real_tmux, "-S", str(socket)]
+    ready, stop = tmp_path / "ready", tmp_path / "stop"
+    ps_calls = tmp_path / "ps-calls"
+    root = tmp_path / "pane_root.py"
+    root.write_text("import ctypes, os, time\nfrom pathlib import Path\n"
+                    "child = os.fork()\n"
+                    "if child == 0:\n"
+                    "    assert ctypes.CDLL(None).prctl(15, b'claude', 0, 0, 0) == 0\n"
+                    f"    Path({str(ready)!r}).touch()\n"
+                    "    deadline = time.monotonic() + 120\n"
+                    f"    while not Path({str(stop)!r}).exists() and time.monotonic() < deadline:\n"
+                    "        time.sleep(0.01)\n"
+                    "    os._exit(0)\n"
+                    "time.sleep(120)\n")
+    created = subprocess.run([*base, "-f", "/dev/null", "new-session", "-d", "-s", "desk",
+                              f"{shlex.quote(sys.executable)} {shlex.quote(str(root))}"],
+                             capture_output=True, text=True, timeout=5)
+    assert created.returncode == 0, created.stderr
+    holder = sqlite3.connect(db, timeout=5, isolation_level=None)
+    control = red = None
+    try:
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists(), "synthetic agent did not become ready"
+        wrapper = tmp_path / "bin/tmux"
+        wrapper.parent.mkdir(exist_ok=True)
+        wrapper.write_text(f"#!{sys.executable}\n" +
+                           f"import os, sys\nos.execv({real_tmux!r}, {base!r} + sys.argv[1:])\n")
+        (tmp_path / "bin/ps").write_text(f"#!{sys.executable}\n" +
+                                         "import os, sys\nfrom pathlib import Path\n" +
+                                         f"with Path({str(ps_calls)!r}).open('a') as log:\n" +
+                                         "    log.write('ps ' + ' '.join(sys.argv[1:]) + '\\n')\n" +
+                                         f"os.execv({real_ps!r}, [{real_ps!r}] + sys.argv[1:])\n")
+        wrapper.chmod(0o755)
+        (tmp_path / "bin/ps").chmod(0o755)
+        monkeypatch.setenv("PATH", str(tmp_path / "bin") + os.pathsep + os.environ["PATH"])
+        monkeypatch.syspath_prepend(str(PLUGIN / "scripts"))
+        from notify_session import resolve_agent, resolve_pane
+        pane, pane_pid = resolve_pane("desk")
+        agent_pid, agent_start = resolve_agent(pane_pid)
+        binding = ["--pane", pane, "--pane-pid", str(pane_pid),
+                   "--agent-pid", str(agent_pid), "--agent-start", agent_start]
+
+        def wait_first_validation(previous):
+            """Block until notify's first ps read has certainly been parsed."""
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                seen = len(ps_calls.read_text().splitlines()) if ps_calls.exists() else 0
+                if seen > previous:
+                    time.sleep(0.2)  # Parsing and the lock wait, still inside the 2 s timeout.
+                    return seen
+                time.sleep(0.01)
+            pytest.fail("notify never ran its first ps validation")
+
+        def spawn(key):
+            return subprocess.Popen(
+                [sys.executable, str(PLUGIN / "scripts/notify_session.py"), "--session", "desk",
+                 "--text-file", str(text), "--key", key, *binding],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        # Control: a live agent still gets its row once the lock is released.
+        seen = len(ps_calls.read_text().splitlines())
+        holder.execute("begin immediate")
+        control = spawn("kanban-watch:d4:control")
+        wait_first_validation(seen)
+        time.sleep(0.3)  # Parsing and the lock wait, still inside the 2 s timeout.
+        holder.execute("commit")
+        _, err = control.communicate(timeout=15)
+        assert control.returncode == 0, err
+        with sqlite3.connect(db) as conn:
+            assert conn.execute("select dedupe_key from messages").fetchall() == [
+                ("kanban-watch:d4:control",)]
+
+        # The agent exits while notify waits on the write lock: nothing queued.
+        seen = len(ps_calls.read_text().splitlines())
+        holder.execute("begin immediate")
+        red = spawn("kanban-watch:d4:exit")
+        wait_first_validation(seen)
+        stop.touch()  # The child exits and stays an unreaped zombie.
+        deadline = time.monotonic() + 5
+        state = "?"
+        while time.monotonic() < deadline:
+            state = Path(f"/proc/{agent_pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+            if state == "Z":
+                break
+            time.sleep(0.01)
+        assert state == "Z", f"bound agent did not become a zombie (state {state})"
+        holder.execute("commit")
+        out, _ = red.communicate(timeout=15)
+        assert red.returncode != 0, out
+        with sqlite3.connect(db) as conn:
+            assert conn.execute("select dedupe_key from messages").fetchall() == [
+                ("kanban-watch:d4:control",)]
+    finally:
+        for process in (control, red):
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.communicate(timeout=5)
+        holder.close()
+        subprocess.run([*base, "kill-server"], capture_output=True, timeout=5, check=True)

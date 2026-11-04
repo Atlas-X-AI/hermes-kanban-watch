@@ -92,11 +92,15 @@ def resolve_agent(pane_pid, agent_pid=None, agent_start=None):
 
 def notify(session, text, key=None, database=None, *, pane=None, pane_pid=None,
            agent_pid=None, agent_start=None):
+    def validate():
+        # Exact target and live agent, re-run from scratch on every call.
+        found_pane, root_pid = resolve_pane(session, pane, pane_pid)
+        resolve_agent(root_pid, agent_pid, agent_start)
+        return found_pane
+
     if not isinstance(text, str) or not text.strip() or len(text) > 16000:
         raise ValueError("Supply non-empty summary text, at most 16000 characters")
-    pane, root_pid = resolve_pane(session, pane, pane_pid)  # Validate before any DB open/write.
-    resolve_agent(root_pid, agent_pid, agent_start)
-    target = f"={session}:.{pane}"  # Refused by tmux if the pane moves to another session.
+    validate()  # Validate before any DB open/write.
     database = Path(database) if database else Path.home() / ".claude/state/messages.db"
     path = database.expanduser().resolve(strict=True)
     key = key or "kanban-watch:" + uuid.uuid4().hex
@@ -106,6 +110,9 @@ def notify(session, text, key=None, database=None, *, pane=None, pane_pid=None,
                        "project_channel": {"type": "project_channel_message", "render": text}}, ensure_ascii=False)
     with closing(sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, timeout=2)) as conn:
         conn.execute("begin immediate")
+        # Revalidate inside the write lock: the agent may have died while this
+        # connection waited for it. Refusal rolls back; nothing is queued.
+        target = f"={session}:.{validate()}"  # Refused by tmux if the pane moves to another session.
         have = conn.execute("select id,target,notify_target,payload from messages where sender=? and dedupe_key=?",
                             ("kanban-watcher", key)).fetchone()
         if have:

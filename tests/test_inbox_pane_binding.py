@@ -67,7 +67,8 @@ def test_shared_windows_pin_parent_not_active_window(shared_tmux, monkeypatch, a
     assert result.returncode == 0 and "STOP final" in result.stdout, result.stderr
     assert rows(inbox) == [("desk", "=desk:.%42")]
     calls = [json.loads(line) for line in Path(os.environ["PANE_CALLS"]).read_text().splitlines()]
-    assert len(calls) == 2 and all("-s" in call for call in calls)
+    # Prepare plus both notify validations (pre-open and inside the write lock).
+    assert len(calls) == 3 and all("-s" in call for call in calls)
 
 
 @pytest.mark.parametrize("pane", [None, "", "%999", "42", "%42\n", "=desk:.%42"])
