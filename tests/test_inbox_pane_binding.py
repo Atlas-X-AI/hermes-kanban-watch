@@ -107,12 +107,16 @@ def test_changed_pane_root_refuses_even_if_agent_is_reparented(shared_tmux, monk
     _, inbox = shared_tmux
     monkeypatch.setenv("TMUX_PANE", "%42")
     receipt = json.loads(launch("--prepare-only", "--cards", "t_done").stdout)
+    # The recorded pane root is still listed for %42 but now runs PID 9999, and
+    # the recorded agent row sits under that new root: the refusal is the
+    # changed pane root, not a missing agent.
     monkeypatch.setenv("SESSION_PANES", "%42 9999\n%43 4300")
     monkeypatch.setenv("PANE_PROCESSES", "9999 1 S Mon Nov 2 08:00:00 2026 zsh\n"
-                       "4201 9999 S Mon Nov 2 08:01:00 2026 claude")
+                       f"{os.environ['PANE_FAKE_AGENT_PID']} 9999 S Mon Nov 2 08:01:00 2026 claude")
     before = inbox.read_bytes()
     result = tick(receipt)
     assert result.returncode == 5 and "delivery UNKNOWN" in result.stderr
+    assert "Recorded pane process changed" in result.stderr, result.stderr
     assert inbox.read_bytes() == before and not rows(inbox)
 
 
@@ -191,28 +195,41 @@ def test_explicit_foreign_pane_never_falls_back(shared_tmux, monkeypatch):
     assert not rows(inbox)
 
 
-@pytest.mark.parametrize("change", ["exited", "replaced", "reused-pid", "moved", "ambiguous"])
+@pytest.mark.parametrize("change", ["exited", "replaced", "reused-pid", "moved", "ambiguous", "zombie", "control"])
 def test_agent_change_inside_unchanged_shell_refuses_delivery(shared_tmux, monkeypatch, change):
+    """The pane still runs its recorded root and agent row (the fake PIDs
+    conftest records, which /proc can see). Each change swaps exactly that
+    agent row; the control table keeps it and delivers, so each refusal comes
+    from its own row. reused-pid is the same PID and parent with a new start
+    time; moved keeps the recorded start and moves the parentage away."""
     _, inbox = shared_tmux
     monkeypatch.setenv("TMUX_PANE", "%42")
     out = launch("--prepare-only", "--cards", "t_done")
     assert out.returncode == 0, out.stderr
     receipt = json.loads(out.stdout)
-    root = "4200 1 S Mon Nov 2 08:00:00 2026 zsh"
-    agent = "4201 4200 S Mon Nov 2 08:01:00 2026 claude"
+    config = json.loads(Path(receipt["config"]).read_text())
+    root_pid = config["pane_pid"]
+    agent_pid = config["agent_pid"]
+    root = f"{root_pid} 1 S Mon Nov 2 08:00:00 2026 zsh"
+    agent = f"{agent_pid} {root_pid} S Mon Nov 2 08:01:00 2026 claude"
     trees = {
         "exited": root,
-        "replaced": root + "\n4202 4200 S Mon Nov 2 08:02:00 2026 claude",
-        "reused-pid": root + "\n4201 4200 S Mon Nov 2 08:02:00 2026 claude",
-        "moved": root + "\n4201 9999 S Mon Nov 2 08:01:00 2026 claude",
-        "ambiguous": root + "\n" + agent + "\n4202 4200 S Mon Nov 2 08:02:00 2026 claude",
+        "replaced": root + f"\n4202 {root_pid} S Mon Nov 2 08:02:00 2026 claude",
+        "reused-pid": root + f"\n{agent_pid} {root_pid} S Mon Nov 2 08:02:00 2026 claude",
+        "moved": root + f"\n{agent_pid} 9999 S Mon Nov 2 08:01:00 2026 claude",
+        "ambiguous": root + "\n" + agent + f"\n4202 {root_pid} S Mon Nov 2 08:02:00 2026 claude",
+        "zombie": root + f"\n{agent_pid} {root_pid} Z Mon Nov 2 08:01:00 2026 claude",
+        "control": root + "\n" + agent,
     }
     monkeypatch.setenv("PANE_PROCESSES", trees[change])
     before = inbox.read_bytes()
     result = tick(receipt)
+    if change == "control":
+        assert result.returncode == 0 and "STOP final" in result.stdout, result.stderr
+        assert rows(inbox) == [("desk", "=desk:.%42")]
+        return
     assert result.returncode == 5 and "delivery UNKNOWN" in result.stderr
     assert inbox.read_bytes() == before and not rows(inbox)
-    config = json.loads(Path(receipt["config"]).read_text())
     relay = json.loads(Path(config["relay_state"]).read_text())
     assert relay["pending"]["reason"] == "final" and "last_receipt" not in relay
 

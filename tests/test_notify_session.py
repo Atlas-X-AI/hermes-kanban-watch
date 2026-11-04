@@ -142,19 +142,44 @@ def test_dedupe_replays_do_not_insert_twice(inbox):
         assert conn.execute("select count(*) from messages").fetchone()[0] == 1
 
 
-@pytest.mark.parametrize("processes", [
-    "4200 1 S Mon Nov 2 08:00:00 2026 zsh\n4201 4200 Z Mon Nov 2 08:01:00 2026 claude",
-    "4200 1 S Mon Nov 2 08:00:00 2026 zsh\n4201 4200 X Mon Nov 2 08:01:00 2026 claude",
-    "4200 1 S Mon Nov 2 08:00:00 2026 zsh\n4201 4200 S Mon Nov 2 08:01:00 2026 node",
-    "4201 4202 S Mon Nov 2 08:01:00 2026 claude\n4202 4201 S Mon Nov 2 08:01:00 2026 zsh",
-    "unreadable process output",
-])
-def test_dead_unknown_or_unreadable_agents_never_open_inbox(inbox, monkeypatch, processes):
+@pytest.mark.parametrize("kind", ["zombie", "dead", "not-claude", "cycle", "unreadable"])
+def test_dead_unknown_or_unreadable_agents_never_open_inbox(inbox, monkeypatch, kind):
     db, text = inbox
-    monkeypatch.setenv("PANE_PROCESSES", processes)
+    # Rooted at the pane PID the fake tmux records, so each refusal comes from
+    # its own row: the row under test is the only difference from the control
+    # table in test_live_agent_row_opens_the_inbox, which delivers.
+    root, agent = os.environ["PANE_FAKE_ROOT_PID"], os.environ["PANE_FAKE_AGENT_PID"]
+    monkeypatch.setenv("TMUX_PANES", "%42 " + root)
+    tables = {
+        "zombie": f"{root} 1 S Mon Nov 2 08:00:00 2026 zsh\n"
+                  f"{agent} {root} Z Mon Nov 2 08:01:00 2026 claude",
+        "dead": f"{root} 1 S Mon Nov 2 08:00:00 2026 zsh\n"
+                f"{agent} {root} X Mon Nov 2 08:01:00 2026 claude",
+        "not-claude": f"{root} 1 S Mon Nov 2 08:00:00 2026 zsh\n"
+                      f"{agent} {root} S Mon Nov 2 08:01:00 2026 node",
+        "cycle": f"{agent} {agent} S Mon Nov 2 08:01:00 2026 claude",
+        "unreadable": "unreadable process output",
+    }
+    monkeypatch.setenv("PANE_PROCESSES", tables[kind])
     before = db.read_bytes()
     assert notify(text).returncode != 0
     assert db.read_bytes() == before
+
+
+def test_live_agent_row_opens_the_inbox(inbox, monkeypatch):
+    """Positive control for the refusal table above: the same shell row with a
+    live claude agent delivers, so those refusals come from the changed row,
+    not from a table that could never deliver."""
+    db, text = inbox
+    root, agent = os.environ["PANE_FAKE_ROOT_PID"], os.environ["PANE_FAKE_AGENT_PID"]
+    monkeypatch.setenv("TMUX_PANES", "%42 " + root)
+    monkeypatch.setenv("PANE_PROCESSES", f"{root} 1 S Mon Nov 2 08:00:00 2026 zsh\n"
+                                         f"{agent} {root} S Mon Nov 2 08:01:00 2026 claude")
+    result = notify(text)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["notify_target"] == "=desk:.%42"
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("select count(*) from messages").fetchone()[0] == 1
 
 
 def test_agent_ancestry_can_include_intermediate_shells(inbox, monkeypatch):
