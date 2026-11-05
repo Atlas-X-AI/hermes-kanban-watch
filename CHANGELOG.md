@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.4
 
 - Report a worker nearly out of iterations (`budget_warning`) and out of them
   (`budget_exhausted`) as immediate problems, with turns used, this run's new commits and
