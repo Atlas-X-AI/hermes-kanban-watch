@@ -48,8 +48,9 @@ try {
       if (scenario === 'bad-clock') return {read_status:'OK',now:0,cards:[],count:0,stale_skipped:[]};
       return {read_status:'OK',now:100,cards:[card],count:1,stale_skipped:[]};
     }
+    const warnings = scenario === 'budget' ? {budget_warning:1,budget_exhausted:1,budget_checkpoint:1,forged:2} : {};
     return {read_status:'OK',now:101,id:card.id,verdict:'DONE',model_that_ran:'test-model',
-      summary:'Built',retried:false,warnings:{}};
+      summary:'Built',retried:false,warnings};
   }, s => logs.push(s));
 } catch (e) { result = {error:e.message}; }
 console.log(JSON.stringify({result,calls,logs}));
@@ -68,6 +69,12 @@ def test_workflow_default_and_override_real_commands(tmp_path):
     assert all(c["options"]["agentType"] == "hermes-kanban-watch:kanban-watcher" for c in out["calls"])
     out = run_workflow(tmp_path, {"live_cmd": "python3 ~/plugin/scripts/kanban_live.py"})
     assert "`python3 ~/plugin/scripts/kanban_live.py cards" in out["calls"][0]["prompt"]
+
+
+def test_workflow_keeps_budget_warnings_and_drops_unknown_kinds(tmp_path):
+    card = run_workflow(tmp_path, {"tasks": ["t_1234abcd"]}, "budget")["result"]["cards"][0]
+    assert card["warnings"] == {"budget_warning": 1, "budget_exhausted": 1}
+    assert "budget_exhausted: 1" in card["odd"] and "forged" not in card["odd"]
 
 
 def test_workflow_agent_types_are_namespaced_or_overridden(tmp_path):

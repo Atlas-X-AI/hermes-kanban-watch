@@ -307,12 +307,12 @@ def budget_problems(data):
 def test_budget_event_is_an_immediate_problem(board, reader, kind, lead):
     used = 135 if kind == "budget_warning" else 150
     event(board, "t_run", kind, int(time.time()),
-          {"iterations": used, "max_iterations": 150, "new_commits": 2, "last_activity": "running tests"})
+          {"iterations": used, "max_iterations": 150, "new_commits": 2, "last_activity": "patch src/app.py"})
     problems = budget_problems(reader.snapshot("demo", now=int(time.time())))
     assert [p["kind"] for p in problems] == [kind]
     assert problems[0]["card"] == "t_run"
     assert problems[0]["text"].startswith(lead)
-    assert "2 new commits this run" in problems[0]["text"] and "running tests" in problems[0]["text"]
+    assert "2 new commits this run" in problems[0]["text"] and "last: patch src/app.py" in problems[0]["text"]
 
 
 def test_quiet_checkpoint_is_not_a_problem(board, reader):
@@ -340,6 +340,20 @@ def test_a_respawn_does_not_hide_an_exhausted_run(board, reader):
     event(board, "t_run", "claimed", now - 4)
     event(board, "t_run", "spawned", now - 4)
     assert [p["kind"] for p in budget_problems(reader.snapshot("demo", now=now))] == ["budget_exhausted"]
+
+
+def test_a_later_budget_event_wakes_the_watch_again(board, reader, tmp_path):
+    clock = Clock()
+    state = tmp_path / "state.json"
+    watch = lambda: reader.wait("demo", ["t_run"], every=900, state_file=state,
+                                clock=clock.time, sleep=clock.sleep)
+    event(board, "t_run", "budget_warning", 900, {"iterations": 135, "max_iterations": 150})
+    assert [p["kind"] for p in watch()["new_problems"]] == ["budget_warning"]
+    # The retry's own warning: the same kind, so only the event id can tell it is new.
+    event(board, "t_run", "budget_warning", 950, {"iterations": 135, "max_iterations": 150})
+    second = watch()
+    assert second["reason"] == "problem"
+    assert [p["kind"] for p in second["new_problems"]] == ["budget_warning"]
 
 
 def test_a_finished_card_stops_reporting_its_budget(board, reader):

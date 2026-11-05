@@ -6,7 +6,8 @@
   (`budget_exhausted`) as immediate problems, with turns used, this run's new commits and
   last activity. The newest one per card is reported, so a long card repeats nothing, and
   a respawn seconds after exhaustion does not hide it. The half-way `budget_checkpoint`
-  stays a quiet record. Needs a Hermes release that writes these events; on an older one
+  stays a quiet record. `last_activity` is the last tool's verb and path, so no worker text
+  reaches a watcher's channel. Needs a Hermes release that writes these events; on an older one
   the watcher simply sees none.
 
 ## 0.4.3
