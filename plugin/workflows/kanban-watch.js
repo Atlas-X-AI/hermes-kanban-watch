@@ -57,7 +57,8 @@ const BOARD_PHASE = 'Kanban board'
 
 // The only warning kinds Python counts (kanban_live.WARNING_KINDS); the model's copy is untrusted text.
 const WARNING_KINDS = ['completion_warnings', 'protocol_violation', 'suspected_hallucinated_references',
-  'model_fallback', 'timed_out', 'crashed', 'block_loop_detected']
+  'model_fallback', 'timed_out', 'crashed', 'block_loop_detected',
+  'budget_warning', 'budget_exhausted']
 
 const CARD = {
   type: 'object',

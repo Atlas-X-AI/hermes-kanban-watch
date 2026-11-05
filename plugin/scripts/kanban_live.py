@@ -123,7 +123,8 @@ ASK = re.compile(r"^[ \t>#*_-]*ASK OPERATOR[*_]*\s*:", re.I | re.M)
 # A planned "Then: ASK OPERATOR" is not a current wait on the operator.
 NAMES_OPERATOR = re.compile(r"\b(waiting (on|for) operator|needs? operator)\b", re.I)
 WARNING_KINDS = ("completion_warnings", "protocol_violation", "suspected_hallucinated_references",
-                 "model_fallback", "timed_out", "crashed", "block_loop_detected")
+                 "model_fallback", "timed_out", "crashed", "block_loop_detected",
+                 "budget_warning", "budget_exhausted")
 
 
 

@@ -81,7 +81,8 @@ leases, state paths, diagnostics, native delivery and the exact reader commands.
 The deterministic wait polls every 60 seconds and wakes every 15 minutes for a
 summary, for a NEW problem, or completion. New problems do not postpone summaries.
 It flags blocked cards, ready over 10 minutes with no recorded worker, respawn
-guards, spawn failures, current parent questions, runs past their runtime cap and
+guards, spawn failures, current parent questions, runs past their runtime cap,
+`budget_warning` and `budget_exhausted` (a worker nearly out of iterations, or out of them) and
 `model_drift`: a run that answered on a model other than its pin (`model_override`),
 or recorded a fallback, flagged in the first report after the worker's first model call.
 Cards marked SUPERSEDED (block reason or a comment since work last resumed) are not
