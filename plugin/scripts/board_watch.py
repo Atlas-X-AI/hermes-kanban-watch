@@ -27,6 +27,9 @@ KNOWN = FINAL | {"triage", "todo", "ready", "scheduled", "running", "review", "b
 RECOVERY = {"claimed", "spawned", "unblocked", "completed", "archived"}
 READY_EVENTS = {"created", "promoted", "unblocked", "changes_requested", "reclaimed", "gave_up"}
 NOISE = {"heartbeat", "capped", "capped_alerted"}
+# Hermes writes these when a worker nearly runs out of iterations and when it does. The
+# half-way ``budget_checkpoint`` is a quiet record, not a problem.
+BUDGET_PROBLEMS = {"budget_warning": "Nearly out of turns", "budget_exhausted": "Ran out of turns"}
 ASK = re.compile(r"^[ \t>#*_-]*ASK (?:PARENT|OPERATOR)[*_]*\s*:", re.I | re.M)
 # A parent's SUPERSEDED marker: the upper-case word anywhere, or any case at a line start.
 # Prose such as "not superseded yet" is not a marker.
@@ -49,6 +52,15 @@ def is_superseded(card, events, comments):
         if last and (resumed is None or last["created_at"] >= resumed):
             texts += [payload(last).get("reason"), payload(last).get("block_reason")]
     return any(isinstance(t, str) and marks_superseded(t) for t in texts)
+
+
+def budget_text(kind, facts):
+    """One line from a budget event. Commits of None is unprovable, so it says unknown."""
+    commits = facts.get("new_commits")
+    said = "commits unknown" if commits is None else f"{commits} new commits this run"
+    activity = facts.get("last_activity")
+    return (f"{BUDGET_PROBLEMS[kind]}: {facts.get('iterations', '?')}/{facts.get('max_iterations', '?')}"
+            f" turns, {said}" + (f", last: {activity}" if activity else ""))
 
 
 def model_drift(card, run):
@@ -221,6 +233,11 @@ def snapshot(board, cards=None, now=None, home=None):
                 for e in events:
                     if e["id"] > recovery and e["kind"] in {"respawn_guarded", "spawn_failed"}:
                         problem(e["kind"], payload(e).get("reason") or e["kind"], e["id"])
+                # The newest only, so a long card repeats nothing, and not cut off at
+                # ``recovery``: the respawn after an exhausted run follows within seconds.
+                budget = next((e for e in reversed(events) if e["kind"] in BUDGET_PROBLEMS), None)
+                if budget:
+                    problem(budget["kind"], budget_text(budget["kind"], payload(budget)), budget["id"])
                 meaningful = [e for e in events if e["kind"] not in NOISE]
                 if status in {"ready", "todo"} and meaningful and meaningful[-1]["kind"] == "dependency_wait" and not live_run:
                     e = meaningful[-1]

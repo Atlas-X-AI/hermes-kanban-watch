@@ -41,6 +41,16 @@ def test_snapshot_current_run_warnings_and_missing(board):
     assert missing["status"] == "NOT_FOUND" and missing["read_status"] == "OK"
 
 
+def test_snapshot_counts_budget_events_as_warnings(board):
+    with sqlite3.connect(board) as con:
+        con.executemany("insert into task_events(task_id,kind,run_id,created_at) values(?,?,?,?)", [
+            ("t_run", "budget_warning", 1, 1), ("t_run", "budget_exhausted", 1, 2),
+            ("t_run", "budget_checkpoint", 1, 3),
+        ])
+    card = json.loads(live("snapshot", "--board", "demo", "--task", "t_run").stdout)
+    assert card["warnings"] == {"budget_exhausted": 1, "budget_warning": 1}
+
+
 @pytest.mark.parametrize("task,code,started", [("t_run", 0, ["t_run"]), ("t_wait", 3, []), ("t_missing", 4, [])])
 def test_wait_any_exit_codes(board, task, code, started):
     out = live("wait-any", "--board", "demo", "--task", task, "--max-seconds", "0")

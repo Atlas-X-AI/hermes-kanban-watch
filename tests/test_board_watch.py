@@ -294,3 +294,71 @@ def test_wait_short_interval_and_time_limit(board, reader, tmp_path):
                          until=1010, clock=clock.time, sleep=clock.sleep)
     assert result["reason"] == "max_hours" and not result["snapshot"]["all_terminal"]
     assert clock.sleeps == [10]
+
+
+def budget_problems(data):
+    return [p for p in data["problems"] if p["kind"].startswith("budget_")]
+
+
+@pytest.mark.parametrize("kind, lead", [
+    ("budget_warning", "Nearly out of turns: 135/150 turns"),
+    ("budget_exhausted", "Ran out of turns: 150/150 turns"),
+])
+def test_budget_event_is_an_immediate_problem(board, reader, kind, lead):
+    used = 135 if kind == "budget_warning" else 150
+    event(board, "t_run", kind, int(time.time()),
+          {"iterations": used, "max_iterations": 150, "new_commits": 2, "last_activity": "patch src/app.py"})
+    problems = budget_problems(reader.snapshot("demo", now=int(time.time())))
+    assert [p["kind"] for p in problems] == [kind]
+    assert problems[0]["card"] == "t_run"
+    assert problems[0]["text"].startswith(lead)
+    assert "2 new commits this run" in problems[0]["text"] and "last: patch src/app.py" in problems[0]["text"]
+
+
+def test_quiet_checkpoint_is_not_a_problem(board, reader):
+    event(board, "t_run", "budget_checkpoint", int(time.time()),
+          {"iterations": 75, "max_iterations": 150, "new_commits": 0})
+    assert budget_problems(reader.snapshot("demo", now=int(time.time()))) == []
+
+
+def test_unknown_commit_count_stays_unknown(board, reader):
+    event(board, "t_run", "budget_warning", int(time.time()),
+          {"iterations": 135, "max_iterations": 150, "new_commits": None})
+    assert "commits unknown" in budget_problems(reader.snapshot("demo", now=int(time.time())))[0]["text"]
+
+
+def test_only_the_newest_budget_event_is_reported(board, reader):
+    now = int(time.time())
+    event(board, "t_run", "budget_warning", now - 60, {"iterations": 135, "max_iterations": 150})
+    event(board, "t_run", "budget_exhausted", now - 30, {"iterations": 150, "max_iterations": 150})
+    assert [p["kind"] for p in budget_problems(reader.snapshot("demo", now=now))] == ["budget_exhausted"]
+
+
+def test_a_respawn_does_not_hide_an_exhausted_run(board, reader):
+    now = int(time.time())
+    event(board, "t_run", "budget_exhausted", now - 30, {"iterations": 150, "max_iterations": 150})
+    event(board, "t_run", "claimed", now - 4)
+    event(board, "t_run", "spawned", now - 4)
+    assert [p["kind"] for p in budget_problems(reader.snapshot("demo", now=now))] == ["budget_exhausted"]
+
+
+def test_a_later_budget_event_wakes_the_watch_again(board, reader, tmp_path):
+    clock = Clock()
+    state = tmp_path / "state.json"
+    watch = lambda: reader.wait("demo", ["t_run"], every=900, state_file=state,
+                                clock=clock.time, sleep=clock.sleep)
+    event(board, "t_run", "budget_warning", 900, {"iterations": 135, "max_iterations": 150})
+    assert [p["kind"] for p in watch()["new_problems"]] == ["budget_warning"]
+    # The retry's own warning: the same kind, so only the event id can tell it is new.
+    event(board, "t_run", "budget_warning", 950, {"iterations": 135, "max_iterations": 150})
+    second = watch()
+    assert second["reason"] == "problem"
+    assert [p["kind"] for p in second["new_problems"]] == ["budget_warning"]
+
+
+def test_a_finished_card_stops_reporting_its_budget(board, reader):
+    now = int(time.time())
+    event(board, "t_run", "budget_warning", now - 60, {"iterations": 135, "max_iterations": 150})
+    with sqlite3.connect(board) as conn:
+        conn.execute("update tasks set status='done' where id='t_run'")
+    assert budget_problems(reader.snapshot("demo", now=now)) == []
