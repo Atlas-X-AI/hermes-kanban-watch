@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- Relay summaries (to the starting session) say which cards run and wait, by the code
+  their titles lead with (`running: API1, DOC2`, `waiting: DOC3, t_wait`), and lead each
+  problem line with that code (`FIX3 (t_1234abcd) blocked: ...`). Still at most 12 lines;
+  board state only, no session store. The direct-Discord draft is unchanged: counts and
+  fixed prose only.
+- Card codes are read from every title shape, not only `CODE:`: `API1 parse the feed`,
+  `API1-codex: ...` (lane word dropped) and `REVIEW API1 ...` / `MERGE LANE API1 ...` (verb
+  kept). A first word that only contains a digit is not a code.
+- Two cards in one `running:` or `waiting:` list with the same code each show their id
+  beside it (`ABC4 t_d1, ABC4 t_d2`), so the list never reads `ABC4, ABC4`.
+- `follow` reads a retried card's newest session: Hermes titles a retry's session
+  `work kanban task <id> #N`, and the exact-title match tailed run 1's session.
+
 ## 0.4.4
 
 - Report a worker nearly out of iterations (`budget_warning`) and out of them

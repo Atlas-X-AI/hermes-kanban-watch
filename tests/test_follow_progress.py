@@ -255,3 +255,18 @@ def test_workflow_progress_prompt_contract(tmp_path, scenario):
     assert result["read_status"] == "OK"
     assert result["cards"][0]["odd"] == ("possibly wedged" if scenario in (
         "progress-flat", "progress-heartbeat", "progress-anthropic-quiet") else "")
+
+
+def test_follow_reads_a_retried_cards_newest_run_session(reader, progress_card):
+    # Hermes titles a retry's session "work kanban task <id> #N" (measured on a card's third run:
+    # runs 2 and 3 were "#2" and "#3"); an exact title match tailed run 1's session for every retry.
+    _, store, _ = progress_card
+    with sqlite3.connect(store) as con:
+        con.execute("insert into sessions values('s1b','kanban','work kanban task t_run #2',5)")
+        con.execute("insert into sessions values('s1x','kanban','work kanban task t_run #2 extra',9)")
+        con.execute("insert into sessions values('s1y','kanban','work kanban task t_run2',9)")
+        con.execute("insert into messages(session_id,role,content,timestamp)"
+                    " values('s1b','assistant','Run two speaking',5)")
+    out = follow(reader, progress_card, compact=False)
+    assert "session s1b in" in out
+    assert "Run two speaking" in out

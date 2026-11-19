@@ -267,23 +267,66 @@ def waiting_count(data):
     return sum(1 for c in data["cards"] if c["status"] not in FINAL | {"running"} and c["id"] not in retired)
 
 
+TITLE_VERB = re.compile(r"(MERGE LANE|REREVIEW|REVIEW|MERGE) ")
+TITLE_CODE = re.compile(r"([A-Z]{1,10}[0-9]+[A-Za-z]?)(?:-[a-z][a-z0-9]*)?(?=[:\s]|$)")
+
+
+def card_code(card):
+    """The code a card title leads with, else the card id.
+
+    Four title shapes: "API1 parse the feed", "API1: parse the feed", "API1-codex: ..." (the lane
+    word is dropped) and "REVIEW API1 ..." (REVIEW, REREVIEW, MERGE, MERGE LANE: the verb stays with
+    the code). The code is the whole first token: upper-case letters, digits, at most one more
+    letter, then a colon, a space or the end; a word that only contains a digit is not a code.
+    """
+    title = " ".join(str(card.get("title") or "").split())
+    verb = TITLE_VERB.match(title)
+    code = TITLE_CODE.match(title[verb.end():] if verb else title)
+    if not code:
+        return card["id"]
+    return f"{verb.group(1)} {code.group(1)}" if verb else code.group(1)
+
+
+def code_list(cards, limit=6):
+    """Cards by code; two cards in the list with one code each show their id beside it."""
+    tags = [card_code(c) for c in cards]
+    shared = {t for t in tags if tags.count(t) > 1}
+    codes = [f"{t} {c['id']}" if t in shared and t != c["id"] else t for c, t in zip(cards, tags)]
+    return ", ".join(codes[:limit]) + (f" +{len(codes) - limit} more" if len(codes) > limit else "")
+
+
 def summary(data):
+    """Relay summary for the starting session, at most 12 lines. The Discord draft stays counts-only."""
     if data.get("read_status") != "OK":
         return "Kanban UNKNOWN: " + short(data.get("error", "read failed"))
     counts = data["counts"]
     done = sum(counts.get(s, 0) for s in FINAL)
     running = counts.get("running", 0)
-    retired = len(data.get("superseded") or [])
+    retired = set(data.get("superseded") or [])
     waiting = waiting_count(data)
     problems = data["problems"]
     lines = [f"Kanban {data['board']}: done {done} / running {running} / waiting {waiting} / problems {len(problems)}" +
-             (f" / superseded {retired}" if retired else "") +
+             (f" / superseded {len(retired)}" if retired else "") +
              (f" / capped {data.get('capped', 0)}" if data.get("capped") else ""),
              "rough time left " + ("0 (all watched cards terminal)" if data["all_terminal"] else "UNKNOWN (runtime limits are not estimates)")]
-    for p in problems[:9]:
-        lines.append(f"{p['card']} {p['kind']}: {short(p['text'])}")
-    if len(problems) > 9:
-        lines.append(f"{len(problems) - 9} more problems in snapshot")
+    # Which cards run and wait, by the code their titles lead with.
+    live = [c for c in data["cards"] if c["id"] not in retired]
+    running_cards = [c for c in live if c["status"] == "running"]
+    waiting_cards = [c for c in live if c["status"] not in FINAL | {"running"}]
+    if running_cards:
+        lines.append("running: " + code_list(running_cards))
+    if waiting_cards:
+        lines.append("waiting: " + code_list(waiting_cards))
+    by_id = {c["id"]: c for c in data["cards"]}
+    room = 12 - len(lines) - 1  # keep one line for the overflow count
+    shown = problems if len(problems) <= room + 1 else problems[:room]
+    for p in shown:
+        card = by_id.get(p["card"], {"id": p["card"]})
+        code = card_code(card)
+        who = code if code == p["card"] else f"{code} ({p['card']})"
+        lines.append(f"{who} {p['kind']}: {short(p['text'])}")
+    if len(problems) > len(shown):
+        lines.append(f"{len(problems) - len(shown)} more problems in snapshot")
     return "\n".join(lines)
 
 
