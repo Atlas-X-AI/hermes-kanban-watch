@@ -286,6 +286,10 @@ TITLE_CODES = [
     ("ABC1x2 widget gate", None),
     ("MERGE the widget branch", None),
     ("Plain widget title with no code", None),
+    ("ABC12xy widget with two trailing letters", None),
+    ("Review ABC2 widget mixed-case verb", None),
+    ("ABCDEFGHIJ1 ten-letter code", "ABCDEFGHIJ1"),
+    ("ABCDEFGHIJK1 eleven-letter word", None),
 ]
 
 
@@ -309,6 +313,13 @@ def test_summary_names_cards_whose_titles_have_no_colon(board, reader):
     assert "running: ABC1" in lines
     assert "waiting: ABC3X, REVIEW ABC2" in lines
     assert "REVIEW ABC2 (t_wait) blocked: needs a key" in text
+
+
+def test_code_list_shows_the_id_beside_a_code_two_cards_share(reader):
+    cards = [{"id": "t_d1", "title": "ABC4 widget frobnicator"}, {"id": "t_d2", "title": "ABC4: gizmo calibration"},
+             {"id": "t_d3", "title": "XY7 sprocket release"}, {"id": "t_d4", "title": "Plain widget title"}]
+    assert reader.code_list(cards) == "ABC4 t_d1, ABC4 t_d2, XY7, t_d4"
+    assert reader.code_list(cards[2:]) == "XY7, t_d4"
 
 
 def test_summary_stays_within_twelve_lines_with_many_cards_and_problems(board, reader):

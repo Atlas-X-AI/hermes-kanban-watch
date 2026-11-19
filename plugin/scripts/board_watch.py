@@ -288,7 +288,10 @@ def card_code(card):
 
 
 def code_list(cards, limit=6):
-    codes = [card_code(c) for c in cards]
+    """Cards by code; two cards in the list with one code each show their id beside it."""
+    tags = [card_code(c) for c in cards]
+    shared = {t for t in tags if tags.count(t) > 1}
+    codes = [f"{t} {c['id']}" if t in shared and t != c["id"] else t for c, t in zip(cards, tags)]
     return ", ".join(codes[:limit]) + (f" +{len(codes) - limit} more" if len(codes) > limit else "")
 
 

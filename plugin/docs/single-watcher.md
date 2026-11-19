@@ -97,7 +97,8 @@ python3 scripts/board_watch.py summary --snapshot-file /path/to/snapshot.json
 `summary` also reads JSON from stdin and accepts a wait envelope. It produces at
 most 12 plain-text lines: done / running / waiting / problems / rough time left,
 then which cards run and wait, by the code their titles lead with (`running: API1, DOC2`;
-a title with no code shows its id), plus bounded problem details led the same way
+a title with no code shows its id, and two cards in one list with the same code each show
+their id beside it: `waiting: ABC4 t_d1, ABC4 t_d2`), plus bounded problem details led the same way
 (`FIX3 (t_1234abcd) blocked: ...`). A code is the title's whole first token when it is
 upper-case letters, digits and at most one more letter, followed by `:`, a space or the
 end: `API1 parse the feed`, `API1: parse the feed`, `API1-codex: ...` (the lower-case lane
