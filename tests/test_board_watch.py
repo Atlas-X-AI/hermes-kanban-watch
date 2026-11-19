@@ -268,6 +268,49 @@ def test_summary_names_running_and_waiting_cards_by_code(board, reader):
     assert len(text.splitlines()) <= 12
 
 
+# One table for every place that reads a code from a title; the private viewer workflow keeps the
+# same table word for word. None: the title has no code, so the card shows its id.
+TITLE_CODES = [
+    ("ABC1 widget frobnicator for the north gate", "ABC1"),
+    ("XY14c: gizmo calibration - phase two", "XY14c"),
+    ("ABC3X-codex sprocket alignment (with retries)", "ABC3X"),
+    ("ZZ9b-kimi: doohickey ledger, nightly", "ZZ9b"),
+    ("REVIEW ABC2 widget frobnicator merge check", "REVIEW ABC2"),
+    ("REREVIEW XY7 gizmo check", "REREVIEW XY7"),
+    ("MERGE QR5 sprocket release", "MERGE QR5"),
+    ("MERGE LANE QR5: sprocket release notes", "MERGE LANE QR5"),
+    ("Re-check 2 widget frobnicators", None),
+    ("1.2.0 gizmo pass on the frobnicator", None),
+    ("abc1 lower-case widget", None),
+    ("Fix2 the widget", None),
+    ("ABC1x2 widget gate", None),
+    ("MERGE the widget branch", None),
+    ("Plain widget title with no code", None),
+]
+
+
+@pytest.mark.parametrize("title,code", TITLE_CODES)
+def test_card_code_reads_every_title_shape(reader, title, code):
+    # "CODE rest", "CODE: rest", "CODE-lane rest", "VERB CODE rest"; a word that only contains a
+    # digit is not a code.
+    assert reader.card_code({"id": "t_x", "title": title}) == (code or "t_x")
+
+
+def test_summary_names_cards_whose_titles_have_no_colon(board, reader):
+    with sqlite3.connect(board) as conn:
+        conn.execute("update tasks set title='ABC1 widget frobnicator for the north gate' where id='t_run'")
+        conn.execute("update tasks set title='REVIEW ABC2 widget frobnicator merge check' where id='t_wait'")
+        conn.execute("update tasks set status='blocked' where id='t_wait'")
+        conn.execute("insert into tasks values('t_q2','ABC3X-codex sprocket alignment (with retries)','builder',"
+                     "'ready',?,null,null,null,null,null)", (int(time.time()),))
+    event(board, "t_wait", "blocked", int(time.time()), {"reason": "needs a key"})
+    text = reader.summary(reader.snapshot("demo"))
+    lines = text.splitlines()
+    assert "running: ABC1" in lines
+    assert "waiting: ABC3X, REVIEW ABC2" in lines
+    assert "REVIEW ABC2 (t_wait) blocked: needs a key" in text
+
+
 def test_summary_stays_within_twelve_lines_with_many_cards_and_problems(board, reader):
     now = int(time.time())
     with sqlite3.connect(board) as conn:

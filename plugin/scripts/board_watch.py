@@ -267,14 +267,24 @@ def waiting_count(data):
     return sum(1 for c in data["cards"] if c["status"] not in FINAL | {"running"} and c["id"] not in retired)
 
 
-CODE = re.compile(r"[A-Za-z]{1,10}\d+[A-Za-z0-9]*(?:-[A-Za-z0-9]+)*")
+TITLE_VERB = re.compile(r"(MERGE LANE|REREVIEW|REVIEW|MERGE) ")
+TITLE_CODE = re.compile(r"([A-Z]{1,10}[0-9]+[A-Za-z]?)(?:-[a-z][a-z0-9]*)?(?=[:\s]|$)")
 
 
 def card_code(card):
-    """The code a card title leads with ("API1: parse the feed ..."), else the card id."""
+    """The code a card title leads with, else the card id.
+
+    Four title shapes: "API1 parse the feed", "API1: parse the feed", "API1-codex: ..." (the lane
+    word is dropped) and "REVIEW API1 ..." (REVIEW, REREVIEW, MERGE, MERGE LANE: the verb stays with
+    the code). The code is the whole first token: upper-case letters, digits, at most one more
+    letter, then a colon, a space or the end; a word that only contains a digit is not a code.
+    """
     title = " ".join(str(card.get("title") or "").split())
-    prefix = title.split(":", 1)[0].strip() if ":" in title else ""
-    return prefix if len(prefix) <= 24 and CODE.fullmatch(prefix) else card["id"]
+    verb = TITLE_VERB.match(title)
+    code = TITLE_CODE.match(title[verb.end():] if verb else title)
+    if not code:
+        return card["id"]
+    return f"{verb.group(1)} {code.group(1)}" if verb else code.group(1)
 
 
 def code_list(cards, limit=6):

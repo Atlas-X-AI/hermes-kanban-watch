@@ -7,6 +7,9 @@
   problem line with that code (`FIX3 (t_1234abcd) blocked: ...`). Still at most 12 lines;
   board state only, no session store. The direct-Discord draft is unchanged: counts and
   fixed prose only.
+- Card codes are read from every title shape, not only `CODE:`: `API1 parse the feed`,
+  `API1-codex: ...` (lane word dropped) and `REVIEW API1 ...` / `MERGE LANE API1 ...` (verb
+  kept). A first word that only contains a digit is not a code.
 - `follow` reads a retried card's newest session: Hermes titles a retry's session
   `work kanban task <id> #N`, and the exact-title match tailed run 1's session.
 
