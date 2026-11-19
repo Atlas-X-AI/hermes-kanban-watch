@@ -267,23 +267,53 @@ def waiting_count(data):
     return sum(1 for c in data["cards"] if c["status"] not in FINAL | {"running"} and c["id"] not in retired)
 
 
+CODE = re.compile(r"[A-Za-z]{1,10}\d+[A-Za-z0-9]*(?:-[A-Za-z0-9]+)*")
+
+
+def card_code(card):
+    """The code a card title leads with ("API1: parse the feed ..."), else the card id."""
+    title = " ".join(str(card.get("title") or "").split())
+    prefix = title.split(":", 1)[0].strip() if ":" in title else ""
+    return prefix if len(prefix) <= 24 and CODE.fullmatch(prefix) else card["id"]
+
+
+def code_list(cards, limit=6):
+    codes = [card_code(c) for c in cards]
+    return ", ".join(codes[:limit]) + (f" +{len(codes) - limit} more" if len(codes) > limit else "")
+
+
 def summary(data):
+    """Relay summary for the starting session, at most 12 lines. The Discord draft stays counts-only."""
     if data.get("read_status") != "OK":
         return "Kanban UNKNOWN: " + short(data.get("error", "read failed"))
     counts = data["counts"]
     done = sum(counts.get(s, 0) for s in FINAL)
     running = counts.get("running", 0)
-    retired = len(data.get("superseded") or [])
+    retired = set(data.get("superseded") or [])
     waiting = waiting_count(data)
     problems = data["problems"]
     lines = [f"Kanban {data['board']}: done {done} / running {running} / waiting {waiting} / problems {len(problems)}" +
-             (f" / superseded {retired}" if retired else "") +
+             (f" / superseded {len(retired)}" if retired else "") +
              (f" / capped {data.get('capped', 0)}" if data.get("capped") else ""),
              "rough time left " + ("0 (all watched cards terminal)" if data["all_terminal"] else "UNKNOWN (runtime limits are not estimates)")]
-    for p in problems[:9]:
-        lines.append(f"{p['card']} {p['kind']}: {short(p['text'])}")
-    if len(problems) > 9:
-        lines.append(f"{len(problems) - 9} more problems in snapshot")
+    # Which cards run and wait, by the code their titles lead with.
+    live = [c for c in data["cards"] if c["id"] not in retired]
+    running_cards = [c for c in live if c["status"] == "running"]
+    waiting_cards = [c for c in live if c["status"] not in FINAL | {"running"}]
+    if running_cards:
+        lines.append("running: " + code_list(running_cards))
+    if waiting_cards:
+        lines.append("waiting: " + code_list(waiting_cards))
+    by_id = {c["id"]: c for c in data["cards"]}
+    room = 12 - len(lines) - 1  # keep one line for the overflow count
+    shown = problems if len(problems) <= room + 1 else problems[:room]
+    for p in shown:
+        card = by_id.get(p["card"], {"id": p["card"]})
+        code = card_code(card)
+        who = code if code == p["card"] else f"{code} ({p['card']})"
+        lines.append(f"{who} {p['kind']}: {short(p['text'])}")
+    if len(problems) > len(shown):
+        lines.append(f"{len(problems) - len(shown)} more problems in snapshot")
     return "\n".join(lines)
 
 

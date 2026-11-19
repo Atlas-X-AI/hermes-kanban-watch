@@ -245,6 +245,44 @@ def test_summary_is_short_plain_and_honest(board, reader):
     assert out.returncode == 0 and out.stdout.strip() == text
 
 
+def test_summary_names_running_and_waiting_cards_by_code(board, reader):
+    # Relay summaries name the cards by the code their titles lead with; a title with no code shows
+    # its id. Board state only, no session stores.
+    with sqlite3.connect(board) as conn:
+        conn.execute("update tasks set title='API1: parse the feed - live requests' where id='t_run'")
+        conn.execute("update tasks set title='Queued card without a code' where id='t_wait'")
+        conn.execute("update tasks set status='blocked' where id='t_wait'")
+        conn.execute("insert into tasks values('t_q2','DOC2: a keep rule for the archive','builder','ready',?,"
+                     "null,null,null,null,null)", (int(time.time()),))
+    event(board, "t_wait", "blocked", int(time.time()), {"reason": "needs a key"})
+    data = reader.snapshot("demo")
+    text = reader.summary(data)
+    lines = text.splitlines()
+    assert "running: API1" in lines
+    assert "waiting: DOC2, t_wait" in lines
+    assert "t_wait blocked: needs a key" in text
+    with sqlite3.connect(board) as conn:
+        conn.execute("update tasks set title='FIX3: retry waits after hand-over' where id='t_wait'")
+    text = reader.summary(reader.snapshot("demo"))
+    assert "FIX3 (t_wait) blocked: needs a key" in text
+    assert len(text.splitlines()) <= 12
+
+
+def test_summary_stays_within_twelve_lines_with_many_cards_and_problems(board, reader):
+    now = int(time.time())
+    with sqlite3.connect(board) as conn:
+        for i in range(12):
+            conn.execute("insert into tasks values(?,?,'builder','blocked',?,null,null,null,null,null)",
+                         (f"t_b{i}", f"B{i}: blocked job {i}", now))
+    for i in range(12):
+        event(board, f"t_b{i}", "blocked", now, {"reason": "stuck"})
+    text = reader.summary(reader.snapshot("demo"))
+    lines = text.splitlines()
+    assert len(lines) <= 12
+    assert any(line.startswith("waiting: ") and line.endswith(" more") for line in lines)
+    assert lines[-1].endswith("more problems in snapshot")
+
+
 class Clock:
     def __init__(self):
         self.now = 1000.0

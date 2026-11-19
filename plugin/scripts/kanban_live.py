@@ -336,13 +336,19 @@ def session_store(assignee: str | None) -> Path | None:
 
 
 def find_session(store: Path, task: str) -> str | None:
-    with connect(store) as conn:
-        row = conn.execute(
-            "select id from sessions where source = 'kanban' and lower(title) = ?"
-            " order by started_at desc limit 1",
-            (f"work kanban task {task}",),
-        ).fetchone()
-    return row["id"] if row else None
+    """The card's newest worker session. A retry's session is titled `work kanban task <id> #N`
+    (measured on a card's third run: runs 2 and 3 were `#2`, `#3`); an exact-title match
+    tailed run 1's session for every retried card."""
+    title = f"work kanban task {task}".lower()
+    like = title.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + " #%"
+    wanted = re.compile(re.escape(title) + r"(?: #\d+)?")
+    with contextlib.closing(connect(store)) as conn:
+        rows = conn.execute(
+            "select id, title from sessions where source = 'kanban'"
+            " and (lower(title) = ? or lower(title) like ? escape '\\') order by started_at desc",
+            (title, like),
+        ).fetchall()
+    return next((row["id"] for row in rows if wanted.fullmatch(str(row["title"]).lower())), None)
 
 
 def render(msg: sqlite3.Row) -> str | None:

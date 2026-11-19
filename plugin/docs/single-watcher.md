@@ -96,7 +96,10 @@ python3 scripts/board_watch.py summary --snapshot-file /path/to/snapshot.json
 
 `summary` also reads JSON from stdin and accepts a wait envelope. It produces at
 most 12 plain-text lines: done / running / waiting / problems / rough time left,
-plus bounded problem details. Archived is counted as finished. Waiting includes
+then which cards run and wait, by the code their titles lead with (`running: API1, DOC2`;
+a title with no code shows its id), plus bounded problem details led the same way
+(`FIX3 (t_1234abcd) blocked: ...`). The direct-Discord draft stays counts and fixed prose
+only. Archived is counted as finished. Waiting includes
 blocked/review; UNKNOWN is never promoted to a pass. Actual model/provider come
 from the current run pointer, or the latest run when the pointer is null. No
 worker profile, session store or log is opened. Runtime caps are not ETAs, so
